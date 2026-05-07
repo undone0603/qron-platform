@@ -1,0 +1,48 @@
+name: Self-Heal (6-hourly)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # every 6 hours
+  workflow_dispatch:         # allow manual trigger
+
+jobs:
+  heal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run self-healing cycle
+        env:
+          APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          APP_URL="${APP_URL:-https://qron.space}"
+          STATUS=$(curl -s -o /tmp/heal.json -w "%{http_code}" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$APP_URL/api/automation/cron-heal" \
+            --max-time 60)
+          cat /tmp/heal.json
+          echo ""
+          echo "HTTP $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::Self-heal cycle returned $STATUS (non-fatal, will retry next run)"
+          fi
+
+      - name: Check platform health after heal
+        env:
+          APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+          HEALTH_SECRET: ${{ secrets.HEALTH_SECRET }}
+        run: |
+          APP_URL="${APP_URL:-https://qron.space}"
+          ARGS=""
+          if [ -n "$HEALTH_SECRET" ]; then
+            ARGS="-H 'Authorization: Bearer $HEALTH_SECRET'"
+          fi
+          STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" \
+            ${HEALTH_SECRET:+-H "Authorization: Bearer $HEALTH_SECRET"} \
+            "$APP_URL/api/health" \
+            --max-time 15)
+          cat /tmp/health.json
+          echo ""
+          if [ "$STATUS" = "503" ]; then
+            echo "::warning::Platform health check returned 503 — check /api/health for details"
+          fi
