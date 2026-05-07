@@ -411,17 +411,236 @@ export class AutonomousController {
   }
 
   /**
-   * Stub: real strainchain.io audit not yet implemented.
+   * StrainChain Industrial Asset Audit.
+   * Scans certifications for expiry, checks telemetry_events for anomalous batches,
+   * and flags industrial QRONs without valid certifications.
    */
   private async runStrainChainAudit() {
-    await logAutomation('[stub]_strainchain_audit', 'cron', 'success', { stub: true });
+    const workflowName = 'strainchain_audit';
+    try {
+      const now = new Date();
+      const in30Days = new Date(now.getTime() + 30 * 86_400_000).toISOString();
+      const nowIso = now.toISOString();
+      let flagged = 0;
+      let expired = 0;
+      let anomalies = 0;
+
+      // 1. Find certifications expiring within 30 days or already expired
+      const { data: expiring } = await admin
+        .from('certifications')
+        .select('id, qron_id, issuer, status, metadata, expires_at')
+        .lte('expires_at', in30Days)
+        .neq('status', 'revoked');
+
+      for (const cert of expiring ?? []) {
+        const isExpired = cert.expires_at && cert.expires_at < nowIso;
+        const severity = isExpired ? 'critical' : 'high';
+        const daysLeft = cert.expires_at
+          ? Math.ceil((new Date(cert.expires_at).getTime() - now.getTime()) / 86_400_000)
+          : 0;
+
+        await admin.from('protocol_anomalies').insert({
+          type: isExpired ? 'cert_expired' : 'cert_expiring',
+          severity,
+          description: isExpired
+            ? `StrainChain certification expired for asset ${cert.qron_id} (issuer: ${cert.issuer})`
+            : `StrainChain certification expiring in ${daysLeft}d for asset ${cert.qron_id}`,
+          qron_id: cert.qron_id,
+          metadata: { cert_id: cert.id, issuer: cert.issuer, expires_at: cert.expires_at },
+        });
+
+        isExpired ? expired++ : flagged++;
+      }
+
+      // 2. Detect quarantine events in telemetry_events in the last 24h
+      const past24h = new Date(now.getTime() - 86_400_000).toISOString();
+      const { data: quarantineEvents } = await admin
+        .from('telemetry_events')
+        .select('id, qron_id, event_type, payload, created_at')
+        .eq('event_type', 'quarantine')
+        .gte('created_at', past24h);
+
+      for (const evt of quarantineEvents ?? []) {
+        await admin.from('protocol_anomalies').insert({
+          type: 'industrial_quarantine',
+          severity: 'critical',
+          description: `StrainChain batch quarantine event detected for asset ${evt.qron_id}`,
+          qron_id: evt.qron_id,
+          metadata: { telemetry_id: evt.id, payload: evt.payload },
+        });
+        anomalies++;
+      }
+
+      // 3. Find industrial QRONs that have no certification at all
+      const { data: industrialQrons } = await admin
+        .from('qrons')
+        .select('id, user_id')
+        .eq('mode', 'industrial')
+        .limit(200);
+
+      if (industrialQrons && industrialQrons.length > 0) {
+        const { data: certifiedIds } = await admin
+          .from('certifications')
+          .select('qron_id')
+          .neq('status', 'revoked')
+          .in('qron_id', industrialQrons.map((q) => q.id));
+
+        const certified = new Set((certifiedIds ?? []).map((c) => c.qron_id));
+        const uncertified = industrialQrons.filter((q) => !certified.has(q.id));
+
+        for (const q of uncertified) {
+          await admin.from('protocol_anomalies').insert({
+            type: 'uncertified_industrial_asset',
+            severity: 'high',
+            description: `Industrial QRON ${q.id} has no active StrainChain certification`,
+            qron_id: q.id,
+            user_id: q.user_id,
+            metadata: {},
+          });
+          flagged++;
+        }
+      }
+
+      // 4. Alert admin if anything critical was found
+      const totalIssues = expired + flagged + anomalies;
+      if (totalIssues > 0) {
+        const webhook = process.env.SECURITY_ALERTS_WEBHOOK_URL;
+        if (webhook) {
+          await fetch(webhook, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              content:
+                `🔬 **StrainChain Audit — ${totalIssues} issue(s) detected**\n` +
+                `• Expired certs: ${expired}\n` +
+                `• Expiring/uncertified: ${flagged}\n` +
+                `• Quarantine events: ${anomalies}`,
+            }),
+          });
+        }
+      }
+
+      await logAutomation(workflowName, 'cron', 'success', {
+        expired_certs: expired,
+        flagged_assets: flagged,
+        quarantine_events: anomalies,
+      });
+    } catch (err: unknown) {
+      await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
+    }
   }
 
   /**
-   * Stub: real govchain.us sync not yet implemented.
+   * GovChain DAO Sync.
+   * Finalises proposals whose voting window has closed: tallies votes, sets status
+   * to 'passed' or 'rejected', enacts passed proposals by updating platform config,
+   * and broadcasts results to the DAO community webhook.
    */
   private async runGovChainSync() {
-    await logAutomation('[stub]_govchain_sync', 'cron', 'success', { stub: true });
+    const workflowName = 'govchain_sync';
+    try {
+      const nowIso = new Date().toISOString();
+      let enacted = 0;
+      let rejected = 0;
+
+      // 1. Fetch proposals whose end_time has passed but status is still 'active'
+      const { data: closedProposals } = await admin
+        .from('governance_proposals')
+        .select('*')
+        .eq('status', 'active')
+        .lte('end_time', nowIso);
+
+      for (const proposal of closedProposals ?? []) {
+        const yes: number = proposal.yes_votes ?? 0;
+        const no: number = proposal.no_votes ?? 0;
+        const total = yes + no;
+        const quorum: number = proposal.quorum_required ?? 0;
+        const threshold: number = proposal.pass_threshold ?? 50;
+
+        const quorumMet = total >= quorum;
+        const majorityMet = total > 0 && (yes / total) * 100 >= threshold;
+        const passed = quorumMet && majorityMet;
+
+        const newStatus = passed ? 'passed' : 'rejected';
+
+        // 2. Update proposal status
+        await admin
+          .from('governance_proposals')
+          .update({
+            status: newStatus,
+            final_yes_votes: yes,
+            final_no_votes: no,
+            enacted_at: passed ? nowIso : null,
+            updated_at: nowIso,
+          })
+          .eq('id', proposal.id);
+
+        // 3. For passed proposals: apply on-chain config changes if payload exists
+        if (passed && proposal.execution_payload) {
+          try {
+            const payload = typeof proposal.execution_payload === 'string'
+              ? JSON.parse(proposal.execution_payload)
+              : proposal.execution_payload;
+
+            if (payload?.fee_bps !== undefined) {
+              await admin
+                .from('fee_flows')
+                .update({ fee_bps: payload.fee_bps, updated_at: nowIso })
+                .eq('id', payload.fee_flow_id ?? 'default');
+            }
+          } catch {
+            // Execution payload malformed — log but don't block the sync
+            await logAutomation('govchain_proposal_enact', 'cron', 'failure', {
+              proposal_id: proposal.id,
+            }, 'Malformed execution_payload');
+          }
+          enacted++;
+        } else if (!passed) {
+          rejected++;
+        }
+
+        // 4. Broadcast result to DAO community channel
+        const daoWebhook = process.env.DAO_COMMUNITY_WEBHOOK_URL;
+        if (daoWebhook) {
+          const yesPercent = total > 0 ? ((yes / total) * 100).toFixed(1) : '0.0';
+          const statusEmoji = passed ? '✅' : '❌';
+          await fetch(daoWebhook, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              content:
+                `${statusEmoji} **GovChain Proposal ${passed ? 'PASSED' : 'REJECTED'}**\n` +
+                `**Title**: ${proposal.title}\n` +
+                `**Result**: ${yesPercent}% YES (${yes} for / ${no} against)\n` +
+                `**Quorum**: ${quorumMet ? 'Met' : 'Not met'} (${total}/${quorum} votes)\n` +
+                `${passed ? '⚡ Changes will be applied automatically.' : '📋 Proposal archived. You can submit a revised version at govchain.us'}`,
+            }),
+          });
+        }
+      }
+
+      // 5. Surface any proposals that passed but were never enacted (data integrity check)
+      const { data: stuckPassed } = await admin
+        .from('governance_proposals')
+        .select('id, title')
+        .eq('status', 'passed')
+        .is('enacted_at', null)
+        .lte('end_time', nowIso);
+
+      if (stuckPassed && stuckPassed.length > 0) {
+        await logAutomation('govchain_enactment_backlog', 'cron', 'failure', {
+          stuck: stuckPassed.map((p) => p.id),
+        }, `${stuckPassed.length} passed proposals have no enacted_at timestamp`);
+      }
+
+      await logAutomation(workflowName, 'cron', 'success', {
+        proposals_finalised: (closedProposals ?? []).length,
+        enacted,
+        rejected,
+      });
+    } catch (err: unknown) {
+      await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
+    }
   }
 
   /**
