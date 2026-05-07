@@ -728,11 +728,49 @@ export class AutonomousController {
   }
 
   /**
-   * Stub: would trigger desktop AgentZ for outreach via webhook/GH Action.
-   * Currently records intent only.
+   * AgentZ — triggers the autonomous outreach + grant-writer pipeline via
+   * GitHub Actions workflow_dispatch. Requires GITHUB_PAT (workflow scope),
+   * GITHUB_OWNER, and GITHUB_REPO to be set.
    */
   private async triggerGrowthEngine() {
-    await logAutomation('[stub]_desktop_growth_outreach', 'cron', 'success', { stub: true });
+    const workflowName = 'agentZ_growth_engine';
+    const pat = process.env.GITHUB_PAT;
+    const owner = process.env.GITHUB_OWNER || 'undone0603';
+    const repo = process.env.GITHUB_REPO || 'qron-platform';
+
+    if (!pat) {
+      await logAutomation(workflowName, 'cron', 'failure', null, 'GITHUB_PAT not configured — AgentZ cannot be triggered');
+      return;
+    }
+
+    try {
+      const res = await withRetry(
+        () =>
+          fetch(
+            `https://api.github.com/repos/${owner}/${repo}/actions/workflows/agentZ-outreach.yml/dispatches`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${pat}`,
+                Accept: 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ ref: 'main', inputs: { mode: 'both', dry_run: 'false' } }),
+            }
+          ),
+        { maxAttempts: 3, baseDelayMs: 2_000 }
+      );
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`GitHub dispatch failed: HTTP ${res.status} — ${body.slice(0, 200)}`);
+      }
+
+      await logAutomation(workflowName, 'cron', 'success', { owner, repo, workflow: 'agentZ-outreach.yml' });
+    } catch (err: unknown) {
+      await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
