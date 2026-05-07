@@ -1,55 +1,89 @@
 /**
- * @file rate-limit.ts
- * @project qron-platform
- * @author AuthiChain Security Ops
- * @copyright (c) 2026 AuthiChain Inc. All rights reserved.
+ * Sliding-window in-memory rate limiter with a DB fallback.
+ *
+ * Two tiers:
+ *  1. In-process LRU cache — O(1) for the common path; zero DB writes.
+ *  2. Supabase fallback   — fire-and-forget persistence for observability.
+ *
+ * The in-memory tier is the authoritative gate. The DB tier is best-effort
+ * and fails open to maximise availability.
  */
 
 import { createClient } from '@/utils/supabase/server';
 
+interface WindowEntry {
+  timestamps: number[];
+  expiresAt: number;
+}
+
+// Bounded map — prevents OOM on long-running instances.
+const MAX_ENTRIES = 10_000;
+const store = new Map<string, WindowEntry>();
+
+function evict() {
+  if (store.size >= MAX_ENTRIES) {
+    const toDelete = Math.ceil(MAX_ENTRIES * 0.1);
+    let deleted = 0;
+    for (const key of store.keys()) {
+      store.delete(key);
+      if (++deleted >= toDelete) break;
+    }
+  }
+}
+
 /**
- * Simple Database-Backed Rate Limiter for AuthiChain Protocol.
- * Tracks requests by IP or User ID in the automation_logs table.
+ * Synchronous in-memory sliding-window check.
+ * Safe to call from edge runtimes and Workers — no I/O.
+ */
+export function checkRateLimitSync(
+  identifier: string,
+  limit = 60,
+  windowMs = 60_000
+): { ok: boolean; remaining: number; resetAt: number } {
+  const now = Date.now();
+  const windowStart = now - windowMs;
+
+  let entry = store.get(identifier);
+  if (!entry || entry.expiresAt < now) {
+    evict();
+    entry = { timestamps: [], expiresAt: now + windowMs };
+    store.set(identifier, entry);
+  }
+
+  entry.timestamps = entry.timestamps.filter((t) => t > windowStart);
+  const remaining = limit - entry.timestamps.length;
+
+  if (remaining <= 0) {
+    return { ok: false, remaining: 0, resetAt: entry.timestamps[0] + windowMs };
+  }
+
+  entry.timestamps.push(now);
+  return { ok: true, remaining: remaining - 1, resetAt: now + windowMs };
+}
+
+/**
+ * Async wrapper — uses in-memory gate and best-effort Supabase persistence.
  */
 export async function checkRateLimit(
-  identifier: string, 
-  limit: number = 60, 
-  windowMinutes: number = 1
+  identifier: string,
+  limit = 60,
+  windowMinutes = 1
 ): Promise<{ ok: boolean; remaining: number }> {
+  const result = checkRateLimitSync(identifier, limit, windowMinutes * 60_000);
+
+  if (result.ok) {
+    persistHit(identifier).catch(() => {});
+  }
+
+  return { ok: result.ok, remaining: result.remaining };
+}
+
+async function persistHit(identifier: string) {
   const supabase = await createClient();
-  const windowStart = new Date(Date.now() - windowMinutes * 60 * 1000).toISOString();
-
-  // Query logs for recent hits from this identifier
-  const { count, error } = await supabase
-    .from('automation_logs')
-    .select('*', { count: 'exact', head: true })
-    .eq('workflow_name', 'api_rate_limit')
-    .eq('payload', identifier)
-    .gt('created_at', windowStart);
-
-  if (error) {
-    console.error('[rate-limit] Query Error:', error);
-    return { ok: true, remaining: limit }; // Fail open for protocol availability
-  }
-
-  const currentHits = count || 0;
-  
-  if (currentHits >= limit) {
-    return { ok: false, remaining: 0 };
-  }
-
-  // Log this hit (Fire and forget)
-  supabase
-    .from('automation_logs')
-    .insert({
-      workflow_name: 'api_rate_limit',
-      trigger_type: 'event',
-      status: 'success',
-      payload: identifier
-    })
-    .then(undefined, (err) => {
-      console.error('[rate-limit] Failed to log hit:', err);
-    });
-
-  return { ok: true, remaining: limit - currentHits - 1 };
+  await supabase.from('automation_logs').insert({
+    workflow_name: 'api_rate_limit',
+    trigger_type: 'event',
+    status: 'success',
+    payload: identifier,
+  });
 }

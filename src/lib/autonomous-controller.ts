@@ -3,10 +3,22 @@ import { logAutomation, formatErr } from './automation';
 import { dispatchWebhook } from './webhooks';
 import { HubSpotDeliverableAgent } from './industrial/hubspot';
 import { sendEmail } from './email';
+import { withRetry } from './retry';
+import { getCircuitBreaker, resetCircuitBreaker, getAllCircuitBreakerStatuses } from './circuit-breaker';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const admin = createClient(supabaseUrl, serviceKey);
+
+/**
+ * Returns an adaptive batch size based on how many items are pending.
+ * Scales between 10 (quiet) and 100 (busy) in three tiers.
+ */
+function adaptiveBatch(queueDepth: number): number {
+  if (queueDepth > 500) return 100;
+  if (queueDepth > 100) return 50;
+  return 20;
+}
 
 /**
  * Autonomous Controller for Platform Business Operations.
@@ -721,5 +733,216 @@ export class AutonomousController {
    */
   private async triggerGrowthEngine() {
     await logAutomation('[stub]_desktop_growth_outreach', 'cron', 'success', { stub: true });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // HOURLY CYCLE — lead ingestion + affiliate validation (lightweight)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Runs every hour via /api/automation/cron-hourly.
+   * Processes new leads and validates affiliate referrals at higher frequency
+   * than the full daily cycle to minimise CRM lag.
+   */
+  async runHourlyCycle() {
+    const start = Date.now();
+    const cb = getCircuitBreaker('supabase', { failureThreshold: 3, timeoutMs: 120_000 });
+    try {
+      // Determine adaptive batch size from current queue depth
+      const { count: pendingLeads } = await cb.exec(() =>
+        admin
+          .from('lead_captures')
+          .select('*', { count: 'exact', head: true })
+          .eq('status', 'new')
+          .then((r) => r)
+      );
+      const batchSize = adaptiveBatch(pendingLeads ?? 0);
+
+      await this.processLeadBatch(batchSize);
+      await this.validateRecentReferrals();
+
+      await logAutomation('hourly_cycle', 'cron', 'success', {
+        durationMs: Date.now() - start,
+        batchSize,
+        pendingLeads: pendingLeads ?? 0,
+      });
+    } catch (err: unknown) {
+      await logAutomation('hourly_cycle', 'cron', 'failure', null, formatErr(err));
+    }
+  }
+
+  private async processLeadBatch(limit: number) {
+    const cb = getCircuitBreaker('hubspot');
+    const { data: leads } = await admin
+      .from('lead_captures')
+      .select('*')
+      .eq('status', 'new')
+      .limit(limit);
+    if (!leads || leads.length === 0) return;
+
+    for (const lead of leads) {
+      try {
+        const hubspotToken = process.env.HUBSPOT_ACCESS_TOKEN;
+        if (hubspotToken) {
+          await cb.exec(() =>
+            withRetry(
+              () =>
+                fetch('https://api.hubapi.com/crm/v3/objects/contacts', {
+                  method: 'POST',
+                  headers: {
+                    Authorization: `Bearer ${hubspotToken}`,
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({
+                    properties: {
+                      email: lead.email,
+                      firstname: lead.name?.split(' ')[0] || '',
+                      hs_lead_status: 'NEW',
+                      lifecyclestage: 'lead',
+                    },
+                  }),
+                }),
+              { maxAttempts: 3, baseDelayMs: 1_000 }
+            )
+          );
+        }
+
+        const score = lead.product_interest === 'authichain' ? 80 : 20;
+        await admin
+          .from('lead_captures')
+          .update({ status: 'contacted', score, updated_at: new Date().toISOString() })
+          .eq('id', lead.id);
+      } catch (err) {
+        console.error(`[autonomous] Lead sync failed for ${lead.email}:`, err);
+      }
+    }
+  }
+
+  private async validateRecentReferrals() {
+    const since = new Date(Date.now() - 3_600_000).toISOString();
+    const { data: refs } = await admin
+      .from('referrals')
+      .select('*')
+      .eq('status', 'tracked')
+      .gte('created_at', since)
+      .limit(50);
+
+    if (!refs || refs.length === 0) return;
+
+    for (const ref of refs) {
+      await admin
+        .from('affiliate_payouts')
+        .insert({ affiliate_id: ref.affiliateId, amount: ref.commissionEarned, status: 'pending' });
+      await admin.from('referrals').update({ status: 'validated' }).eq('id', ref.id);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SELF-HEAL — detects stuck/failed workflows and recovers automatically
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Inspects the last `windowMinutes` of automation_logs, identifies
+   * workflows that failed ≥ failureThreshold times without a subsequent
+   * success, resets their circuit breakers, and re-queues them.
+   *
+   * Called by /api/automation/heal or wired into the daily cycle.
+   */
+  async runSelfHeal(windowMinutes = 60, failureThreshold = 3) {
+    const workflowName = 'self_heal';
+    const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
+
+    try {
+      const { data: rows } = await admin
+        .from('automation_logs')
+        .select('workflow_name, status, created_at')
+        .gte('created_at', since)
+        .order('created_at', { ascending: false })
+        .limit(1_000);
+
+      if (!rows || rows.length === 0) return;
+
+      // Build per-workflow: last_status + consecutive_failures
+      const wfMap = new Map<string, { failures: number; lastStatus: string }>();
+      for (const row of rows) {
+        if (!wfMap.has(row.workflow_name)) {
+          wfMap.set(row.workflow_name, { failures: 0, lastStatus: row.status });
+        }
+        const entry = wfMap.get(row.workflow_name)!;
+        if (row.status === 'failure') entry.failures++;
+        // First row (most recent) already sets lastStatus
+      }
+
+      const stuck = Array.from(wfMap.entries()).filter(
+        ([, v]) => v.failures >= failureThreshold && v.lastStatus === 'failure'
+      );
+
+      if (stuck.length === 0) {
+        await logAutomation(workflowName, 'cron', 'success', { healed: 0, window: windowMinutes });
+        return;
+      }
+
+      // Reset circuit breakers for stuck workflows
+      for (const [name] of stuck) {
+        resetCircuitBreaker(name);
+      }
+
+      // Re-trigger tasks that map to runnable methods
+      const healable: string[] = [];
+      const healMap: Record<string, () => Promise<void>> = {
+        federal_drip_sequencer: () => this['runFederalDripSequencer'](),
+        agent_viral_marketing: () => this['runViralMarketingAgent'](),
+        agent_revenue_recycling: () => this['runRevenueRecyclingAgent'](),
+        agent_industrial_watchdog: () => this['runIndustrialWatchdog'](),
+        agent_governance_arbiter: () => this['runGovernanceArbiter'](),
+        qron_story_sync: () => this['runQronStorySync'](),
+        affiliate_payout_cycle: () => this['processAffiliatePayouts'](),
+        hubspot_deliverable_cycle: () => this['processHubSpotDeliverables'](),
+        executive_report: () => this['sendExecutiveReport'](),
+      };
+
+      for (const [name] of stuck) {
+        const fn = healMap[name];
+        if (fn) {
+          try {
+            await fn();
+            healable.push(name);
+          } catch (err) {
+            console.warn(`[self_heal] Re-run of ${name} failed again:`, err);
+          }
+        }
+      }
+
+      await logAutomation(workflowName, 'cron', 'success', {
+        window: windowMinutes,
+        stuckWorkflows: stuck.map(([n]) => n),
+        healed: healable,
+        breakersReset: stuck.map(([n]) => n),
+      });
+    } catch (err: unknown) {
+      await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
+    }
+  }
+
+  /**
+   * Returns a health snapshot for monitoring dashboards.
+   */
+  async getHealthSnapshot() {
+    const since1h = new Date(Date.now() - 3_600_000).toISOString();
+    const since24h = new Date(Date.now() - 86_400_000).toISOString();
+
+    const [{ count: fails1h }, { count: fails24h }, { count: successCount }] = await Promise.all([
+      admin.from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'failure').gte('created_at', since1h),
+      admin.from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'failure').gte('created_at', since24h),
+      admin.from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'success').gte('created_at', since24h),
+    ]);
+
+    return {
+      failures1h: fails1h ?? 0,
+      failures24h: fails24h ?? 0,
+      successes24h: successCount ?? 0,
+      circuitBreakers: getAllCircuitBreakerStatuses(),
+      timestamp: new Date().toISOString(),
+    };
   }
 }

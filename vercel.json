@@ -7,6 +7,14 @@
     {
       "path": "/api/crm/sync",
       "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/automation/cron-hourly",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/automation/cron-heal",
+      "schedule": "0 */6 * * *"
     }
   ]
 }
