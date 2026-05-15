@@ -14,6 +14,11 @@ import {
   Vote,
   ArrowRight,
   Palette,
+  Activity,
+  Coins,
+  Eye,
+  ScanLine,
+  ShieldCheck,
 } from 'lucide-react';
 import { createClient } from '@/utils/supabase/client';
 import { User } from '@supabase/supabase-js';
