@@ -13,6 +13,7 @@ import {
   Package,
   Vote,
   ArrowRight,
+  Palette,
 } from 'lucide-react';
 import { createClient } from '@/utils/supabase/client';
 import { User } from '@supabase/supabase-js';
