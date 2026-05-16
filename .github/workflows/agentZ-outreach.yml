@@ -17,6 +17,8 @@ on:
         required: false
         default: 'false'
         type: boolean
+  schedule:
+    - cron: '0 6 * * 1'   # Weekly Monday 06:00 UTC — outreach + grants
 
 jobs:
   agentZ:
@@ -44,12 +46,13 @@ jobs:
         run: npx tsx scripts/outreach-generator.ts
 
       - name: Run GovChain Grant Writer Agent
-        if: ${{ github.event.inputs.mode == 'both' || github.event.inputs.mode == 'grants' }}
+        if: ${{ github.event.inputs.mode == 'both' || github.event.inputs.mode == 'grants' || github.event_name == 'schedule' }}
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: npx tsx scripts/grant-writer-agent.ts
 
       - name: Notify on failure

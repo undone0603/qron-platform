@@ -1,0 +1,74 @@
+name: AgentZ — Browser Agent (Playwright + Claude Vision)
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Which task to run'
+        required: false
+        default: 'monitor_strainchain'
+        type: choice
+        options:
+          - monitor_strainchain
+          - monitor_govchain
+          - research_grants
+      dry_run:
+        description: 'Dry run (log only, no Supabase writes)'
+        required: false
+        default: 'false'
+        type: boolean
+  schedule:
+    - cron: '0 8 * * *'   # Daily at 08:00 UTC — strainchain monitor
+    - cron: '0 9 * * *'   # Daily at 09:00 UTC — govchain monitor
+
+jobs:
+  browser-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright + Chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Run browser agent
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
+          DAO_COMMUNITY_WEBHOOK_URL: ${{ secrets.DAO_COMMUNITY_WEBHOOK_URL }}
+          SECURITY_ALERTS_WEBHOOK_URL: ${{ secrets.SECURITY_ALERTS_WEBHOOK_URL }}
+          BROWSER_TASK: ${{ github.event.inputs.task || 'monitor_strainchain' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: npx tsx scripts/browser-agent.ts
+
+      - name: Run govchain monitor (scheduled only)
+        if: github.event_name == 'schedule' && github.event.schedule == '0 9 * * *'
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DAO_COMMUNITY_WEBHOOK_URL: ${{ secrets.DAO_COMMUNITY_WEBHOOK_URL }}
+          BROWSER_TASK: monitor_govchain
+          DRY_RUN: 'false'
+        run: npx tsx scripts/browser-agent.ts
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          SECURITY_ALERTS_WEBHOOK_URL: ${{ secrets.SECURITY_ALERTS_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SECURITY_ALERTS_WEBHOOK_URL" ]; then
+            curl -s -X POST "$SECURITY_ALERTS_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "{\"content\": \"⚠️ **Browser Agent Failed** — Task: ${{ github.event.inputs.task || 'scheduled' }} — [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\"}"
+          fi

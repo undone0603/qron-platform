@@ -987,8 +987,40 @@ export class AutonomousController {
       }
 
       await logAutomation(workflowName, 'cron', 'success', { owner, repo, workflow: 'agentZ-outreach.yml' });
+
+      // Also dispatch the browser agent for daily web monitoring
+      await this.dispatchWorkflow(pat, owner, repo, 'agentZ-browser.yml', { task: 'monitor_strainchain', dry_run: 'false' });
     } catch (err: unknown) {
       await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
+    }
+  }
+
+  private async dispatchWorkflow(
+    pat: string,
+    owner: string,
+    repo: string,
+    workflow: string,
+    inputs: Record<string, string>,
+  ): Promise<void> {
+    const res = await withRetry(
+      () =>
+        fetch(`https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${pat}`,
+            Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ ref: 'main', inputs }),
+        }),
+      { maxAttempts: 2, baseDelayMs: 1_000 },
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.warn(`[autonomous] ${workflow} dispatch failed: HTTP ${res.status} — ${body.slice(0, 200)}`);
+    } else {
+      console.log(`[autonomous] Dispatched ${workflow}`);
     }
   }
 
