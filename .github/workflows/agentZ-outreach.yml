@@ -1,0 +1,67 @@
+name: AgentZ — Autonomous Outreach & Grant Writer
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Which agent to run'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - outreach
+          - grants
+      dry_run:
+        description: 'Dry run (log only, no Supabase writes)'
+        required: false
+        default: 'false'
+        type: boolean
+  schedule:
+    - cron: '0 6 * * 1'   # Weekly Monday 06:00 UTC — outreach + grants
+
+jobs:
+  agentZ:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Channel A — Print Shop Outreach Generator
+        if: ${{ github.event.inputs.mode == 'both' || github.event.inputs.mode == 'outreach' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+          HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: npx tsx scripts/outreach-generator.ts
+
+      - name: Run GovChain Grant Writer Agent
+        if: ${{ github.event.inputs.mode == 'both' || github.event.inputs.mode == 'grants' || github.event_name == 'schedule' }}
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: npx tsx scripts/grant-writer-agent.ts
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          SECURITY_ALERTS_WEBHOOK_URL: ${{ secrets.SECURITY_ALERTS_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SECURITY_ALERTS_WEBHOOK_URL" ]; then
+            curl -s -X POST "$SECURITY_ALERTS_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "{\"content\": \"⚠️ **AgentZ Run Failed** — Mode: ${{ github.event.inputs.mode }} — [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\"}"
+          fi

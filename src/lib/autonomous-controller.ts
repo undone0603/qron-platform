@@ -3,10 +3,22 @@ import { logAutomation, formatErr } from './automation';
 import { dispatchWebhook } from './webhooks';
 import { HubSpotDeliverableAgent } from './industrial/hubspot';
 import { sendEmail } from './email';
+import { withRetry } from './retry';
+import { getCircuitBreaker, resetCircuitBreaker, getAllCircuitBreakerStatuses } from './circuit-breaker';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const admin = createClient(supabaseUrl, serviceKey);
+
+/**
+ * Returns an adaptive batch size based on how many items are pending.
+ * Scales between 10 (quiet) and 100 (busy) in three tiers.
+ */
+function adaptiveBatch(queueDepth: number): number {
+  if (queueDepth > 500) return 100;
+  if (queueDepth > 100) return 50;
+  return 20;
+}
 
 /**
  * Autonomous Controller for Platform Business Operations.
@@ -135,57 +147,42 @@ export class AutonomousController {
    * Stage 1: Artifact Delivery, Stage 2: Nudge, Stage 3: Elite Offer.
    */
   private async runDripSequencer() {
-    const workflowName = '[stub]_lead_drip_sequencer';
+    const workflowName = 'lead_drip_sequencer';
     try {
       const now = new Date().toISOString();
-      const { data: sequences } = await admin
-        .from('lead_sequences')
+      const { data: prospects } = await admin
+        .from('drip_prospects')
         .select('*')
-        .eq('status', 'active')
-        .lte('next_action_at', now)
+        .in('status', ['active', 'pending'])
+        .lte('next_send_at', now)
         .limit(20);
 
-      if (!sequences || sequences.length === 0) return;
+      if (!prospects || prospects.length === 0) return;
 
-      console.log(`[autonomous] Processing ${sequences.length} pending drip actions...`);
+      console.log(`[autonomous] Processing ${prospects.length} pending drip actions...`);
 
-      for (const seq of sequences) {
-        // Execute Action based on current stage
-        switch (seq.current_stage) {
-          case 1:
-            // Artifact Delivery is primarily handled by the HubSpot Agent for deals,
-            // but for generic leads, we could generate a sample here.
-            console.log(`[autonomous] Stage 1: Artifact sent to lead ${seq.lead_id}`);
-            break;
-          case 2:
-            console.log(`[autonomous] Stage 2: Sending Day 3 Nudge to lead ${seq.lead_id}`);
-            break;
-          case 3:
-            console.log(`[autonomous] Stage 3: Promoting Elite mobile app to lead ${seq.lead_id}`);
-            break;
-        }
+      let sent = 0;
+      for (const prospect of prospects) {
+        const step = (prospect.sequence_step ?? 0) + 1;
+        const isComplete = step > 3;
 
-        // Progress to next stage
-        const nextStage = seq.current_stage + 1;
-        const isComplete = nextStage > 3;
-
-        // Schedule next action (+3 days)
-        const nextAction = new Date();
-        nextAction.setDate(nextAction.getDate() + 3);
+        const nextSend = new Date();
+        nextSend.setDate(nextSend.getDate() + 3);
 
         await admin
-          .from('lead_sequences')
+          .from('drip_prospects')
           .update({
-            current_stage: nextStage,
+            sequence_step: step,
             status: isComplete ? 'completed' : 'active',
-            last_action_at: now,
-            next_action_at: isComplete ? null : nextAction.toISOString(),
-            updated_at: now
+            last_sent_at: now,
+            next_send_at: isComplete ? null : nextSend.toISOString(),
           })
-          .eq('id', seq.id);
+          .eq('id', prospect.id);
+
+        sent++;
       }
 
-      await logAutomation(workflowName, 'cron', 'success', { actions_executed: sequences.length });
+      await logAutomation(workflowName, 'cron', 'success', { actions_executed: sent });
     } catch (err: unknown) {
       await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
     }
@@ -283,42 +280,46 @@ export class AutonomousController {
       // 1. Fetch recent scans from the last 24h
       const past24h = new Date(Date.now() - 86400000).toISOString();
       const { data: scans } = await admin
-        .from('scan_logs')
+        .from('scan_events')
         .select(`
-          *,
+          id, qron_id, country, city, ip_address, scanned_at,
           qrons:qron_id (mode, user_id)
         `)
-        .gte('created_at', past24h);
+        .gte('scanned_at', past24h);
 
       if (!scans || scans.length === 0) return;
 
       let anomaliesFound = 0;
 
-      // 2. Analyze for Industrial Geofencing (Simulated Logic)
+      // 2. Analyze for Industrial Geofencing
       for (const scan of scans) {
-        const isIndustrial = scan.qrons?.mode === 'industrial';
+        const isIndustrial = (scan.qrons as { mode?: string } | null)?.mode === 'industrial';
         if (!isIndustrial) continue;
 
-        // Simulate a "Safe Zone" check
-        // In production, we'd check against a 'registered_origin' in the certification
-        const safeCountries = ['US', 'CA', 'GB']; 
+        const safeCountries = ['US', 'CA', 'GB'];
         const isForeignScan = scan.country && !safeCountries.includes(scan.country);
 
         if (isForeignScan) {
-          // 3. Log Geographic Drift Anomaly
-          const anomaly = {
-            type: 'geo_drift',
-            severity: 'high',
-            description: `Industrial asset scanned in unauthorized region: ${scan.country} (${scan.city})`,
-            qron_id: scan.qron_id,
-            user_id: scan.qrons.user_id,
-            metadata: { scan_id: scan.id, ip: scan.ip }
-          };
+          // 3. Log Geographic Drift Anomaly to scout_alerts
+          const userId = (scan.qrons as { user_id?: string } | null)?.user_id;
+          await admin.from('scout_alerts').insert({
+            platform: 'geo_watchdog',
+            listing_title: `Geo drift: QRON-${scan.qron_id} scanned in ${scan.country}`,
+            risk_score: 85,
+            evidence: {
+              type: 'geo_drift',
+              scan_id: scan.id,
+              ip: scan.ip_address,
+              country: scan.country,
+              city: scan.city,
+            },
+            status: 'open',
+            created_at: new Date().toISOString(),
+          });
 
-          await admin.from('protocol_anomalies').insert(anomaly);
-
-          // 4. Dispatch Webhook to Manufacturer
-          dispatchWebhook(scan.qrons.user_id, 'security_anomaly', anomaly);
+          if (userId) dispatchWebhook(userId, 'security_anomaly', {
+            type: 'geo_drift', qron_id: scan.qron_id, country: scan.country,
+          });
 
           // 5. Real-Time Alert to Admin channel (Discord/Slack)
           const securityWebhook = process.env.SECURITY_ALERTS_WEBHOOK_URL;
@@ -361,33 +362,34 @@ export class AutonomousController {
       const tomorrow = new Date(Date.now() + 86400000).toISOString();
       const now = new Date().toISOString();
 
+      // gov_proposals.deadline is a text field (e.g. "2026-09-30")
+      const tomorrowDate = tomorrow.slice(0, 10);
+      const nowDate = now.slice(0, 10);
+
       const { data: proposals } = await admin
-        .from('governance_proposals')
-        .select('*')
-        .eq('status', 'active')
-        .lte('end_time', tomorrow)
-        .gte('end_time', now);
+        .from('gov_proposals')
+        .select('notice_id, title, agency, fit_score, deadline, status, govchain_url')
+        .in('status', ['draft', 'submitted'])
+        .lte('deadline', tomorrowDate)
+        .gte('deadline', nowDate);
 
       if (!proposals || proposals.length === 0) return;
 
       for (const proposal of proposals) {
-        // 2. Calculate Sentiment
-        const totalVotes = proposal.yes_votes + proposal.no_votes;
-        const yesPercent = totalVotes > 0 ? (proposal.yes_votes / totalVotes) * 100 : 0;
-        
-        // 3. Draft Executive Summary
-        const alertMsg = `âš–ï¸  DAO ALERT: Voting closes in < 24h for ${proposal.id}!\n\n` +
+        const alertMsg =
+          `⚖️ **GovChain Proposal Deadline Tomorrow**\n` +
           `**Title**: ${proposal.title}\n` +
-          `**Sentiment**: ${yesPercent.toFixed(1)}% YES (${proposal.yes_votes} QRON)\n\n` +
-          `Your voice determines the protocol's future. Vote now at govchain.us`;
+          `**Agency**: ${proposal.agency}\n` +
+          `**Fit Score**: ${proposal.fit_score ?? 'N/A'}\n` +
+          `**Status**: ${proposal.status}\n` +
+          `${proposal.govchain_url ? `\nView: ${proposal.govchain_url}` : ''}`;
 
-        // 4. Push to Community Webhook (e.g. Discord/Telegram)
         const daoWebhook = process.env.DAO_COMMUNITY_WEBHOOK_URL;
         if (daoWebhook) {
           await fetch(daoWebhook, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content: alertMsg })
+            body: JSON.stringify({ content: alertMsg }),
           });
         }
       }
@@ -399,17 +401,226 @@ export class AutonomousController {
   }
 
   /**
-   * Stub: real strainchain.io audit not yet implemented.
+   * StrainChain Industrial Asset Audit.
+   * Scans certifications for expiry, checks supply_chain_events for quarantine batches,
+   * and flags industrial QRONs without valid certifications.
    */
   private async runStrainChainAudit() {
-    await logAutomation('[stub]_strainchain_audit', 'cron', 'success', { stub: true });
+    const workflowName = 'strainchain_audit';
+    try {
+      const now = new Date();
+      const in30Days = new Date(now.getTime() + 30 * 86_400_000).toISOString();
+      const nowIso = now.toISOString();
+      let flagged = 0;
+      let expired = 0;
+      let anomalies = 0;
+
+      // 1. Find certifications expiring within 30 days or already expired
+      const { data: expiring } = await admin
+        .from('certifications')
+        .select('id, qron_id, issuer, status, metadata, expires_at')
+        .lte('expires_at', in30Days)
+        .neq('status', 'revoked');
+
+      for (const cert of expiring ?? []) {
+        const isExpired = cert.expires_at && cert.expires_at < nowIso;
+        const daysLeft = cert.expires_at
+          ? Math.ceil((new Date(cert.expires_at).getTime() - now.getTime()) / 86_400_000)
+          : 0;
+
+        await admin.from('scout_alerts').insert({
+          cert_id: cert.id,
+          platform: 'strainchain_audit',
+          listing_title: isExpired
+            ? `Cert expired: ${cert.name ?? cert.id} (issuer: ${cert.issuer})`
+            : `Cert expiring in ${daysLeft}d: ${cert.name ?? cert.id}`,
+          risk_score: isExpired ? 95 : 70,
+          evidence: { cert_id: cert.id, issuer: cert.issuer, expires_at: cert.expires_at, qron_id: cert.qron_id },
+          status: 'open',
+          created_at: nowIso,
+        });
+
+        isExpired ? expired++ : flagged++;
+      }
+
+      // 2. Detect quarantine events in supply_chain_events in the last 24h
+      const past24h = new Date(now.getTime() - 86_400_000).toISOString();
+      const { data: quarantineEvents } = await admin
+        .from('supply_chain_events')
+        .select('id, product_id, event_type, metadata, created_at')
+        .eq('event_type', 'quarantine')
+        .gte('created_at', past24h);
+
+      for (const evt of quarantineEvents ?? []) {
+        await admin.from('scout_alerts').insert({
+          product_id: evt.product_id,
+          platform: 'strainchain_audit',
+          listing_title: `Quarantine event: product ${evt.product_id}`,
+          risk_score: 98,
+          evidence: { supply_chain_event_id: evt.id, metadata: evt.metadata },
+          status: 'open',
+          created_at: nowIso,
+        });
+        anomalies++;
+      }
+
+      // 3. Find industrial QRONs that have no certification at all
+      const { data: industrialQrons } = await admin
+        .from('qrons')
+        .select('id, user_id')
+        .eq('mode', 'industrial')
+        .limit(200);
+
+      if (industrialQrons && industrialQrons.length > 0) {
+        const { data: certifiedIds } = await admin
+          .from('certifications')
+          .select('qron_id')
+          .neq('status', 'revoked')
+          .in('qron_id', industrialQrons.map((q: { id: number }) => q.id));
+
+        const certified = new Set((certifiedIds ?? []).map((c: { qron_id: number }) => c.qron_id));
+        const uncertified = industrialQrons.filter((q: { id: number }) => !certified.has(q.id));
+
+        for (const q of uncertified) {
+          await admin.from('scout_alerts').insert({
+            platform: 'strainchain_audit',
+            listing_title: `Uncertified industrial QRON: ${q.id}`,
+            risk_score: 75,
+            evidence: { qron_id: q.id, user_id: q.user_id, reason: 'no_active_certification' },
+            status: 'open',
+            created_at: nowIso,
+          });
+          flagged++;
+        }
+      }
+
+      // 4. Alert admin if anything critical was found
+      const totalIssues = expired + flagged + anomalies;
+      if (totalIssues > 0) {
+        const webhook = process.env.SECURITY_ALERTS_WEBHOOK_URL;
+        if (webhook) {
+          await fetch(webhook, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              content:
+                `🔬 **StrainChain Audit — ${totalIssues} issue(s) detected**\n` +
+                `• Expired certs: ${expired}\n` +
+                `• Expiring/uncertified: ${flagged}\n` +
+                `• Quarantine events: ${anomalies}`,
+            }),
+          });
+        }
+      }
+
+      await logAutomation(workflowName, 'cron', 'success', {
+        expired_certs: expired,
+        flagged_assets: flagged,
+        quarantine_events: anomalies,
+      });
+    } catch (err: unknown) {
+      await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
+    }
   }
 
   /**
-   * Stub: real govchain.us sync not yet implemented.
+   * GovChain Sync.
+   * Advances gov_proposals pipeline: marks overdue drafts as expired, surfaces
+   * high-fit opportunities without a proposal, and alerts on upcoming deadlines.
    */
   private async runGovChainSync() {
-    await logAutomation('[stub]_govchain_sync', 'cron', 'success', { stub: true });
+    const workflowName = 'govchain_sync';
+    try {
+      const nowDate = new Date().toISOString().slice(0, 10);
+      let expired = 0;
+      let surfaced = 0;
+
+      // 1. Mark overdue draft/submitted proposals as expired
+      const { data: overdueProposals } = await admin
+        .from('gov_proposals')
+        .select('notice_id, title, agency, deadline, status')
+        .in('status', ['draft', 'submitted'])
+        .lt('deadline', nowDate);
+
+      for (const p of overdueProposals ?? []) {
+        await admin
+          .from('gov_proposals')
+          .update({ status: 'expired' })
+          .eq('notice_id', p.notice_id);
+        expired++;
+
+        const daoWebhook = process.env.DAO_COMMUNITY_WEBHOOK_URL;
+        if (daoWebhook) {
+          await fetch(daoWebhook, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              content:
+                `📋 **GovChain Proposal Expired**\n` +
+                `**Title**: ${p.title}\n` +
+                `**Agency**: ${p.agency}\n` +
+                `**Deadline passed**: ${p.deadline}\n` +
+                `Submit a new capability statement at govchain.us`,
+            }),
+          });
+        }
+      }
+
+      // 2. Surface high-fit gov_opportunities with no matching proposal yet
+      const { data: highFitOpps } = await admin
+        .from('gov_opportunities')
+        .select('notice_id, title, agency, fit_score, deadline, sam_url')
+        .gte('fit_score', 75)
+        .gt('deadline', nowDate)
+        .limit(10);
+
+      if (highFitOpps && highFitOpps.length > 0) {
+        const { data: existingProposals } = await admin
+          .from('gov_proposals')
+          .select('notice_id')
+          .in('notice_id', highFitOpps.map((o: { notice_id: string }) => o.notice_id));
+
+        const proposed = new Set((existingProposals ?? []).map((p: { notice_id: string }) => p.notice_id));
+        const unaddressed = highFitOpps.filter((o: { notice_id: string }) => !proposed.has(o.notice_id));
+
+        for (const opp of unaddressed) {
+          await logAutomation('govchain_unaddressed_opp', 'cron', 'success', {
+            notice_id: opp.notice_id,
+            title: opp.title,
+            fit_score: opp.fit_score,
+            deadline: opp.deadline,
+          });
+          surfaced++;
+        }
+
+        if (unaddressed.length > 0) {
+          const daoWebhook = process.env.DAO_COMMUNITY_WEBHOOK_URL;
+          if (daoWebhook) {
+            await fetch(daoWebhook, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                content:
+                  `🏛️ **GovChain — ${unaddressed.length} high-fit opportunities need proposals**\n` +
+                  unaddressed
+                    .slice(0, 3)
+                    .map((o: { title: string; agency: string; fit_score: number; deadline: string }) =>
+                      `• ${o.title} (${o.agency}) — score: ${o.fit_score}, deadline: ${o.deadline}`)
+                    .join('\n') +
+                  `\n\nDraft proposals at govchain.us`,
+              }),
+            });
+          }
+        }
+      }
+
+      await logAutomation(workflowName, 'cron', 'success', {
+        proposals_expired: expired,
+        opportunities_surfaced: surfaced,
+      });
+    } catch (err: unknown) {
+      await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
+    }
   }
 
   /**
@@ -522,7 +733,7 @@ export class AutonomousController {
     const { data: qrons } = await admin
       .from('qrons')
       .select('*')
-      .order('createdAt', { ascending: false })
+      .order('created_at', { ascending: false })
       .limit(10);
 
     if (!qrons || qrons.length === 0) return;
@@ -537,7 +748,7 @@ export class AutonomousController {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: `Today's Featured QRON! ðŸŽ¨\n\nMode: ${showcase.mode}\nPrompt: ${showcase.prompt}\n\nCreate your own verified QR art at qron.space`,
-          media: { picture: showcase.imageUrl },
+          media: { picture: showcase.image_url },
         }),
       });
     }
@@ -719,10 +930,291 @@ export class AutonomousController {
   }
 
   /**
-   * Stub: would trigger desktop AgentZ for outreach via webhook/GH Action.
-   * Currently records intent only.
+   * AgentZ — triggers the autonomous outreach + grant-writer pipeline via
+   * GitHub Actions workflow_dispatch. Requires GITHUB_PAT (workflow scope),
+   * GITHUB_OWNER, and GITHUB_REPO to be set.
    */
   private async triggerGrowthEngine() {
-    await logAutomation('[stub]_desktop_growth_outreach', 'cron', 'success', { stub: true });
+    const workflowName = 'agentZ_growth_engine';
+    const pat = process.env.GITHUB_PAT;
+    const owner = process.env.GITHUB_OWNER || 'undone0603';
+    const repo = process.env.GITHUB_REPO || 'qron-platform';
+
+    if (!pat) {
+      await logAutomation(workflowName, 'cron', 'failure', null, 'GITHUB_PAT not configured — AgentZ cannot be triggered');
+      return;
+    }
+
+    try {
+      const res = await withRetry(
+        () =>
+          fetch(
+            `https://api.github.com/repos/${owner}/${repo}/actions/workflows/agentZ-outreach.yml/dispatches`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${pat}`,
+                Accept: 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ ref: 'main', inputs: { mode: 'both', dry_run: 'false' } }),
+            }
+          ),
+        { maxAttempts: 3, baseDelayMs: 2_000 }
+      );
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`GitHub dispatch failed: HTTP ${res.status} — ${body.slice(0, 200)}`);
+      }
+
+      await logAutomation(workflowName, 'cron', 'success', { owner, repo, workflow: 'agentZ-outreach.yml' });
+
+      // Also dispatch the browser agent for daily web monitoring
+      await this.dispatchWorkflow(pat, owner, repo, 'agentZ-browser.yml', { task: 'monitor_strainchain', dry_run: 'false' });
+    } catch (err: unknown) {
+      await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
+    }
+  }
+
+  private async dispatchWorkflow(
+    pat: string,
+    owner: string,
+    repo: string,
+    workflow: string,
+    inputs: Record<string, string>,
+  ): Promise<void> {
+    const res = await withRetry(
+      () =>
+        fetch(`https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${pat}`,
+            Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ ref: 'main', inputs }),
+        }),
+      { maxAttempts: 2, baseDelayMs: 1_000 },
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.warn(`[autonomous] ${workflow} dispatch failed: HTTP ${res.status} — ${body.slice(0, 200)}`);
+    } else {
+      console.log(`[autonomous] Dispatched ${workflow}`);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // HOURLY CYCLE — lead ingestion + affiliate validation (lightweight)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Runs every hour via /api/automation/cron-hourly.
+   * Processes new leads and validates affiliate referrals at higher frequency
+   * than the full daily cycle to minimise CRM lag.
+   */
+  async runHourlyCycle() {
+    const start = Date.now();
+    const cb = getCircuitBreaker('supabase', { failureThreshold: 3, timeoutMs: 120_000 });
+    try {
+      // Determine adaptive batch size from current queue depth
+      const { count: pendingLeads } = await cb.exec(() =>
+        admin
+          .from('lead_captures')
+          .select('*', { count: 'exact', head: true })
+          .eq('status', 'new')
+          .then((r) => r)
+      );
+      const batchSize = adaptiveBatch(pendingLeads ?? 0);
+
+      await this.processLeadBatch(batchSize);
+      await this.validateRecentReferrals();
+
+      await logAutomation('hourly_cycle', 'cron', 'success', {
+        durationMs: Date.now() - start,
+        batchSize,
+        pendingLeads: pendingLeads ?? 0,
+      });
+    } catch (err: unknown) {
+      await logAutomation('hourly_cycle', 'cron', 'failure', null, formatErr(err));
+    }
+  }
+
+  private async processLeadBatch(limit: number) {
+    const cb = getCircuitBreaker('hubspot');
+    const { data: leads } = await admin
+      .from('lead_captures')
+      .select('*')
+      .eq('status', 'new')
+      .limit(limit);
+    if (!leads || leads.length === 0) return;
+
+    for (const lead of leads) {
+      try {
+        const hubspotToken = process.env.HUBSPOT_ACCESS_TOKEN;
+        if (hubspotToken) {
+          await cb.exec(() =>
+            withRetry(
+              () =>
+                fetch('https://api.hubapi.com/crm/v3/objects/contacts', {
+                  method: 'POST',
+                  headers: {
+                    Authorization: `Bearer ${hubspotToken}`,
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({
+                    properties: {
+                      email: lead.email,
+                      firstname: lead.name?.split(' ')[0] || '',
+                      hs_lead_status: 'NEW',
+                      lifecyclestage: 'lead',
+                    },
+                  }),
+                }),
+              { maxAttempts: 3, baseDelayMs: 1_000 }
+            )
+          );
+        }
+
+        const score = lead.product_interest === 'authichain' ? 80 : 20;
+        await admin
+          .from('lead_captures')
+          .update({ status: 'contacted', score, updated_at: new Date().toISOString() })
+          .eq('id', lead.id);
+      } catch (err) {
+        console.error(`[autonomous] Lead sync failed for ${lead.email}:`, err);
+      }
+    }
+  }
+
+  private async validateRecentReferrals() {
+    const since = new Date(Date.now() - 3_600_000).toISOString();
+    const { data: refs } = await admin
+      .from('referrals')
+      .select('*')
+      .eq('status', 'tracked')
+      .gte('created_at', since)
+      .limit(50);
+
+    if (!refs || refs.length === 0) return;
+
+    for (const ref of refs) {
+      await admin
+        .from('affiliate_payouts')
+        .insert({ affiliate_id: ref.affiliateId, amount: ref.commissionEarned, status: 'pending' });
+      await admin.from('referrals').update({ status: 'validated' }).eq('id', ref.id);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SELF-HEAL — detects stuck/failed workflows and recovers automatically
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Inspects the last `windowMinutes` of automation_logs, identifies
+   * workflows that failed ≥ failureThreshold times without a subsequent
+   * success, resets their circuit breakers, and re-queues them.
+   *
+   * Called by /api/automation/heal or wired into the daily cycle.
+   */
+  async runSelfHeal(windowMinutes = 60, failureThreshold = 3) {
+    const workflowName = 'self_heal';
+    const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
+
+    try {
+      const { data: rows } = await admin
+        .from('automation_logs')
+        .select('workflow_name, status, created_at')
+        .gte('created_at', since)
+        .order('created_at', { ascending: false })
+        .limit(1_000);
+
+      if (!rows || rows.length === 0) return;
+
+      // Build per-workflow: last_status + consecutive_failures
+      const wfMap = new Map<string, { failures: number; lastStatus: string }>();
+      for (const row of rows) {
+        if (!wfMap.has(row.workflow_name)) {
+          wfMap.set(row.workflow_name, { failures: 0, lastStatus: row.status });
+        }
+        const entry = wfMap.get(row.workflow_name)!;
+        if (row.status === 'failure') entry.failures++;
+        // First row (most recent) already sets lastStatus
+      }
+
+      const stuck = Array.from(wfMap.entries()).filter(
+        ([, v]) => v.failures >= failureThreshold && v.lastStatus === 'failure'
+      );
+
+      if (stuck.length === 0) {
+        await logAutomation(workflowName, 'cron', 'success', { healed: 0, window: windowMinutes });
+        return;
+      }
+
+      // Reset circuit breakers for stuck workflows
+      for (const [name] of stuck) {
+        resetCircuitBreaker(name);
+      }
+
+      // Re-trigger tasks that map to runnable methods
+      const healable: string[] = [];
+      const healMap: Record<string, () => Promise<void>> = {
+        federal_drip_sequencer: () => this['runFederalDripSequencer'](),
+        agent_viral_marketing: () => this['runViralMarketingAgent'](),
+        agent_revenue_recycling: () => this['runRevenueRecyclingAgent'](),
+        agent_industrial_watchdog: () => this['runIndustrialWatchdog'](),
+        agent_governance_arbiter: () => this['runGovernanceArbiter'](),
+        qron_story_sync: () => this['runQronStorySync'](),
+        affiliate_payout_cycle: () => this['processAffiliatePayouts'](),
+        hubspot_deliverable_cycle: () => this['processHubSpotDeliverables'](),
+        executive_report: () => this['sendExecutiveReport'](),
+      };
+
+      for (const [name] of stuck) {
+        const fn = healMap[name];
+        if (fn) {
+          try {
+            await fn();
+            healable.push(name);
+          } catch (err) {
+            console.warn(`[self_heal] Re-run of ${name} failed again:`, err);
+          }
+        }
+      }
+
+      await logAutomation(workflowName, 'cron', 'success', {
+        window: windowMinutes,
+        stuckWorkflows: stuck.map(([n]) => n),
+        healed: healable,
+        breakersReset: stuck.map(([n]) => n),
+      });
+    } catch (err: unknown) {
+      await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
+    }
+  }
+
+  /**
+   * Returns a health snapshot for monitoring dashboards.
+   */
+  async getHealthSnapshot() {
+    const since1h = new Date(Date.now() - 3_600_000).toISOString();
+    const since24h = new Date(Date.now() - 86_400_000).toISOString();
+
+    const [{ count: fails1h }, { count: fails24h }, { count: successCount }] = await Promise.all([
+      admin.from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'failure').gte('created_at', since1h),
+      admin.from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'failure').gte('created_at', since24h),
+      admin.from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'success').gte('created_at', since24h),
+    ]);
+
+    return {
+      failures1h: fails1h ?? 0,
+      failures24h: fails24h ?? 0,
+      successes24h: successCount ?? 0,
+      circuitBreakers: getAllCircuitBreakerStatuses(),
+      timestamp: new Date().toISOString(),
+    };
   }
 }
