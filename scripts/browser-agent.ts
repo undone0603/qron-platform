@@ -136,13 +136,15 @@ async function monitorStrainChain() {
         created_at: new Date().toISOString(),
       });
 
-      // Surface any alerts as protocol anomalies
+      // Surface any alerts as scout_alerts
       for (const alert of parsed.alerts) {
-        await admin.from('protocol_anomalies').insert({
-          type: 'strainchain_monitor',
-          severity: 'medium',
-          description: alert,
-          metadata: { source: 'browser_agent', task: 'monitor_strainchain' },
+        await admin.from('scout_alerts').insert({
+          platform: 'browser_agent_strainchain',
+          listing_title: alert,
+          risk_score: 60,
+          evidence: { source: 'browser_agent', task: 'monitor_strainchain', alert },
+          status: 'open',
+          created_at: new Date().toISOString(),
         });
       }
     }
@@ -281,19 +283,18 @@ async function researchGrants() {
     console.log(`      ${qualification.slice(0, 200)}`);
 
     if (!DRY_RUN && admin) {
-      await admin.from('governance_proposals').upsert({
-        id: `grant_research_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        title: `[Research] ${opp.title}`,
-        description: `Value: ${opp.value}\nDeadline: ${opp.deadline}\nRelevance: ${opp.relevance}\n\nClaude recommendation:\n${qualification}`,
-        status: 'draft',
-        yes_votes: 0,
-        no_votes: 0,
-        quorum_required: 0,
-        pass_threshold: 100,
-        end_time: opp.deadline ? new Date(opp.deadline).toISOString() : new Date(Date.now() + 30 * 86_400_000).toISOString(),
+      await admin.from('grant_applications').insert({
+        program: `[Research] ${opp.title}`,
+        agency: '',
+        category: 'federal_research',
+        amount_min: 0,
+        amount_max: 0,
+        deadline: opp.deadline || null,
+        status: 'prospecting',
+        notes: `Value: ${opp.value}\nRelevance: ${opp.relevance}\n\nClaude recommendation:\n${qualification}`,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
-      }, { onConflict: 'id' });
+      });
     }
   }
 

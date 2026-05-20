@@ -147,57 +147,42 @@ export class AutonomousController {
    * Stage 1: Artifact Delivery, Stage 2: Nudge, Stage 3: Elite Offer.
    */
   private async runDripSequencer() {
-    const workflowName = '[stub]_lead_drip_sequencer';
+    const workflowName = 'lead_drip_sequencer';
     try {
       const now = new Date().toISOString();
-      const { data: sequences } = await admin
-        .from('lead_sequences')
+      const { data: prospects } = await admin
+        .from('drip_prospects')
         .select('*')
-        .eq('status', 'active')
-        .lte('next_action_at', now)
+        .in('status', ['active', 'pending'])
+        .lte('next_send_at', now)
         .limit(20);
 
-      if (!sequences || sequences.length === 0) return;
+      if (!prospects || prospects.length === 0) return;
 
-      console.log(`[autonomous] Processing ${sequences.length} pending drip actions...`);
+      console.log(`[autonomous] Processing ${prospects.length} pending drip actions...`);
 
-      for (const seq of sequences) {
-        // Execute Action based on current stage
-        switch (seq.current_stage) {
-          case 1:
-            // Artifact Delivery is primarily handled by the HubSpot Agent for deals,
-            // but for generic leads, we could generate a sample here.
-            console.log(`[autonomous] Stage 1: Artifact sent to lead ${seq.lead_id}`);
-            break;
-          case 2:
-            console.log(`[autonomous] Stage 2: Sending Day 3 Nudge to lead ${seq.lead_id}`);
-            break;
-          case 3:
-            console.log(`[autonomous] Stage 3: Promoting Elite mobile app to lead ${seq.lead_id}`);
-            break;
-        }
+      let sent = 0;
+      for (const prospect of prospects) {
+        const step = (prospect.sequence_step ?? 0) + 1;
+        const isComplete = step > 3;
 
-        // Progress to next stage
-        const nextStage = seq.current_stage + 1;
-        const isComplete = nextStage > 3;
-
-        // Schedule next action (+3 days)
-        const nextAction = new Date();
-        nextAction.setDate(nextAction.getDate() + 3);
+        const nextSend = new Date();
+        nextSend.setDate(nextSend.getDate() + 3);
 
         await admin
-          .from('lead_sequences')
+          .from('drip_prospects')
           .update({
-            current_stage: nextStage,
+            sequence_step: step,
             status: isComplete ? 'completed' : 'active',
-            last_action_at: now,
-            next_action_at: isComplete ? null : nextAction.toISOString(),
-            updated_at: now
+            last_sent_at: now,
+            next_send_at: isComplete ? null : nextSend.toISOString(),
           })
-          .eq('id', seq.id);
+          .eq('id', prospect.id);
+
+        sent++;
       }
 
-      await logAutomation(workflowName, 'cron', 'success', { actions_executed: sequences.length });
+      await logAutomation(workflowName, 'cron', 'success', { actions_executed: sent });
     } catch (err: unknown) {
       await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
     }
@@ -295,42 +280,46 @@ export class AutonomousController {
       // 1. Fetch recent scans from the last 24h
       const past24h = new Date(Date.now() - 86400000).toISOString();
       const { data: scans } = await admin
-        .from('scan_logs')
+        .from('scan_events')
         .select(`
-          *,
+          id, qron_id, country, city, ip_address, scanned_at,
           qrons:qron_id (mode, user_id)
         `)
-        .gte('created_at', past24h);
+        .gte('scanned_at', past24h);
 
       if (!scans || scans.length === 0) return;
 
       let anomaliesFound = 0;
 
-      // 2. Analyze for Industrial Geofencing (Simulated Logic)
+      // 2. Analyze for Industrial Geofencing
       for (const scan of scans) {
-        const isIndustrial = scan.qrons?.mode === 'industrial';
+        const isIndustrial = (scan.qrons as { mode?: string } | null)?.mode === 'industrial';
         if (!isIndustrial) continue;
 
-        // Simulate a "Safe Zone" check
-        // In production, we'd check against a 'registered_origin' in the certification
-        const safeCountries = ['US', 'CA', 'GB']; 
+        const safeCountries = ['US', 'CA', 'GB'];
         const isForeignScan = scan.country && !safeCountries.includes(scan.country);
 
         if (isForeignScan) {
-          // 3. Log Geographic Drift Anomaly
-          const anomaly = {
-            type: 'geo_drift',
-            severity: 'high',
-            description: `Industrial asset scanned in unauthorized region: ${scan.country} (${scan.city})`,
-            qron_id: scan.qron_id,
-            user_id: scan.qrons.user_id,
-            metadata: { scan_id: scan.id, ip: scan.ip }
-          };
+          // 3. Log Geographic Drift Anomaly to scout_alerts
+          const userId = (scan.qrons as { user_id?: string } | null)?.user_id;
+          await admin.from('scout_alerts').insert({
+            platform: 'geo_watchdog',
+            listing_title: `Geo drift: QRON-${scan.qron_id} scanned in ${scan.country}`,
+            risk_score: 85,
+            evidence: {
+              type: 'geo_drift',
+              scan_id: scan.id,
+              ip: scan.ip_address,
+              country: scan.country,
+              city: scan.city,
+            },
+            status: 'open',
+            created_at: new Date().toISOString(),
+          });
 
-          await admin.from('protocol_anomalies').insert(anomaly);
-
-          // 4. Dispatch Webhook to Manufacturer
-          dispatchWebhook(scan.qrons.user_id, 'security_anomaly', anomaly);
+          if (userId) dispatchWebhook(userId, 'security_anomaly', {
+            type: 'geo_drift', qron_id: scan.qron_id, country: scan.country,
+          });
 
           // 5. Real-Time Alert to Admin channel (Discord/Slack)
           const securityWebhook = process.env.SECURITY_ALERTS_WEBHOOK_URL;
@@ -373,33 +362,34 @@ export class AutonomousController {
       const tomorrow = new Date(Date.now() + 86400000).toISOString();
       const now = new Date().toISOString();
 
+      // gov_proposals.deadline is a text field (e.g. "2026-09-30")
+      const tomorrowDate = tomorrow.slice(0, 10);
+      const nowDate = now.slice(0, 10);
+
       const { data: proposals } = await admin
-        .from('governance_proposals')
-        .select('*')
-        .eq('status', 'active')
-        .lte('end_time', tomorrow)
-        .gte('end_time', now);
+        .from('gov_proposals')
+        .select('notice_id, title, agency, fit_score, deadline, status, govchain_url')
+        .in('status', ['draft', 'submitted'])
+        .lte('deadline', tomorrowDate)
+        .gte('deadline', nowDate);
 
       if (!proposals || proposals.length === 0) return;
 
       for (const proposal of proposals) {
-        // 2. Calculate Sentiment
-        const totalVotes = proposal.yes_votes + proposal.no_votes;
-        const yesPercent = totalVotes > 0 ? (proposal.yes_votes / totalVotes) * 100 : 0;
-        
-        // 3. Draft Executive Summary
-        const alertMsg = `âš–ï¸  DAO ALERT: Voting closes in < 24h for ${proposal.id}!\n\n` +
+        const alertMsg =
+          `⚖️ **GovChain Proposal Deadline Tomorrow**\n` +
           `**Title**: ${proposal.title}\n` +
-          `**Sentiment**: ${yesPercent.toFixed(1)}% YES (${proposal.yes_votes} QRON)\n\n` +
-          `Your voice determines the protocol's future. Vote now at govchain.us`;
+          `**Agency**: ${proposal.agency}\n` +
+          `**Fit Score**: ${proposal.fit_score ?? 'N/A'}\n` +
+          `**Status**: ${proposal.status}\n` +
+          `${proposal.govchain_url ? `\nView: ${proposal.govchain_url}` : ''}`;
 
-        // 4. Push to Community Webhook (e.g. Discord/Telegram)
         const daoWebhook = process.env.DAO_COMMUNITY_WEBHOOK_URL;
         if (daoWebhook) {
           await fetch(daoWebhook, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content: alertMsg })
+            body: JSON.stringify({ content: alertMsg }),
           });
         }
       }
@@ -412,7 +402,7 @@ export class AutonomousController {
 
   /**
    * StrainChain Industrial Asset Audit.
-   * Scans certifications for expiry, checks telemetry_events for anomalous batches,
+   * Scans certifications for expiry, checks supply_chain_events for quarantine batches,
    * and flags industrial QRONs without valid certifications.
    */
   private async runStrainChainAudit() {
@@ -434,39 +424,42 @@ export class AutonomousController {
 
       for (const cert of expiring ?? []) {
         const isExpired = cert.expires_at && cert.expires_at < nowIso;
-        const severity = isExpired ? 'critical' : 'high';
         const daysLeft = cert.expires_at
           ? Math.ceil((new Date(cert.expires_at).getTime() - now.getTime()) / 86_400_000)
           : 0;
 
-        await admin.from('protocol_anomalies').insert({
-          type: isExpired ? 'cert_expired' : 'cert_expiring',
-          severity,
-          description: isExpired
-            ? `StrainChain certification expired for asset ${cert.qron_id} (issuer: ${cert.issuer})`
-            : `StrainChain certification expiring in ${daysLeft}d for asset ${cert.qron_id}`,
-          qron_id: cert.qron_id,
-          metadata: { cert_id: cert.id, issuer: cert.issuer, expires_at: cert.expires_at },
+        await admin.from('scout_alerts').insert({
+          cert_id: cert.id,
+          platform: 'strainchain_audit',
+          listing_title: isExpired
+            ? `Cert expired: ${cert.name ?? cert.id} (issuer: ${cert.issuer})`
+            : `Cert expiring in ${daysLeft}d: ${cert.name ?? cert.id}`,
+          risk_score: isExpired ? 95 : 70,
+          evidence: { cert_id: cert.id, issuer: cert.issuer, expires_at: cert.expires_at, qron_id: cert.qron_id },
+          status: 'open',
+          created_at: nowIso,
         });
 
         isExpired ? expired++ : flagged++;
       }
 
-      // 2. Detect quarantine events in telemetry_events in the last 24h
+      // 2. Detect quarantine events in supply_chain_events in the last 24h
       const past24h = new Date(now.getTime() - 86_400_000).toISOString();
       const { data: quarantineEvents } = await admin
-        .from('telemetry_events')
-        .select('id, qron_id, event_type, payload, created_at')
+        .from('supply_chain_events')
+        .select('id, product_id, event_type, metadata, created_at')
         .eq('event_type', 'quarantine')
         .gte('created_at', past24h);
 
       for (const evt of quarantineEvents ?? []) {
-        await admin.from('protocol_anomalies').insert({
-          type: 'industrial_quarantine',
-          severity: 'critical',
-          description: `StrainChain batch quarantine event detected for asset ${evt.qron_id}`,
-          qron_id: evt.qron_id,
-          metadata: { telemetry_id: evt.id, payload: evt.payload },
+        await admin.from('scout_alerts').insert({
+          product_id: evt.product_id,
+          platform: 'strainchain_audit',
+          listing_title: `Quarantine event: product ${evt.product_id}`,
+          risk_score: 98,
+          evidence: { supply_chain_event_id: evt.id, metadata: evt.metadata },
+          status: 'open',
+          created_at: nowIso,
         });
         anomalies++;
       }
@@ -483,19 +476,19 @@ export class AutonomousController {
           .from('certifications')
           .select('qron_id')
           .neq('status', 'revoked')
-          .in('qron_id', industrialQrons.map((q) => q.id));
+          .in('qron_id', industrialQrons.map((q: { id: number }) => q.id));
 
-        const certified = new Set((certifiedIds ?? []).map((c) => c.qron_id));
-        const uncertified = industrialQrons.filter((q) => !certified.has(q.id));
+        const certified = new Set((certifiedIds ?? []).map((c: { qron_id: number }) => c.qron_id));
+        const uncertified = industrialQrons.filter((q: { id: number }) => !certified.has(q.id));
 
         for (const q of uncertified) {
-          await admin.from('protocol_anomalies').insert({
-            type: 'uncertified_industrial_asset',
-            severity: 'high',
-            description: `Industrial QRON ${q.id} has no active StrainChain certification`,
-            qron_id: q.id,
-            user_id: q.user_id,
-            metadata: {},
+          await admin.from('scout_alerts').insert({
+            platform: 'strainchain_audit',
+            listing_title: `Uncertified industrial QRON: ${q.id}`,
+            risk_score: 75,
+            evidence: { qron_id: q.id, user_id: q.user_id, reason: 'no_active_certification' },
+            status: 'open',
+            created_at: nowIso,
           });
           flagged++;
         }
@@ -531,112 +524,99 @@ export class AutonomousController {
   }
 
   /**
-   * GovChain DAO Sync.
-   * Finalises proposals whose voting window has closed: tallies votes, sets status
-   * to 'passed' or 'rejected', enacts passed proposals by updating platform config,
-   * and broadcasts results to the DAO community webhook.
+   * GovChain Sync.
+   * Advances gov_proposals pipeline: marks overdue drafts as expired, surfaces
+   * high-fit opportunities without a proposal, and alerts on upcoming deadlines.
    */
   private async runGovChainSync() {
     const workflowName = 'govchain_sync';
     try {
-      const nowIso = new Date().toISOString();
-      let enacted = 0;
-      let rejected = 0;
+      const nowDate = new Date().toISOString().slice(0, 10);
+      let expired = 0;
+      let surfaced = 0;
 
-      // 1. Fetch proposals whose end_time has passed but status is still 'active'
-      const { data: closedProposals } = await admin
-        .from('governance_proposals')
-        .select('*')
-        .eq('status', 'active')
-        .lte('end_time', nowIso);
+      // 1. Mark overdue draft/submitted proposals as expired
+      const { data: overdueProposals } = await admin
+        .from('gov_proposals')
+        .select('notice_id, title, agency, deadline, status')
+        .in('status', ['draft', 'submitted'])
+        .lt('deadline', nowDate);
 
-      for (const proposal of closedProposals ?? []) {
-        const yes: number = proposal.yes_votes ?? 0;
-        const no: number = proposal.no_votes ?? 0;
-        const total = yes + no;
-        const quorum: number = proposal.quorum_required ?? 0;
-        const threshold: number = proposal.pass_threshold ?? 50;
-
-        const quorumMet = total >= quorum;
-        const majorityMet = total > 0 && (yes / total) * 100 >= threshold;
-        const passed = quorumMet && majorityMet;
-
-        const newStatus = passed ? 'passed' : 'rejected';
-
-        // 2. Update proposal status
+      for (const p of overdueProposals ?? []) {
         await admin
-          .from('governance_proposals')
-          .update({
-            status: newStatus,
-            final_yes_votes: yes,
-            final_no_votes: no,
-            enacted_at: passed ? nowIso : null,
-            updated_at: nowIso,
-          })
-          .eq('id', proposal.id);
+          .from('gov_proposals')
+          .update({ status: 'expired' })
+          .eq('notice_id', p.notice_id);
+        expired++;
 
-        // 3. For passed proposals: apply on-chain config changes if payload exists
-        if (passed && proposal.execution_payload) {
-          try {
-            const payload = typeof proposal.execution_payload === 'string'
-              ? JSON.parse(proposal.execution_payload)
-              : proposal.execution_payload;
-
-            if (payload?.fee_bps !== undefined) {
-              await admin
-                .from('fee_flows')
-                .update({ fee_bps: payload.fee_bps, updated_at: nowIso })
-                .eq('id', payload.fee_flow_id ?? 'default');
-            }
-          } catch {
-            // Execution payload malformed — log but don't block the sync
-            await logAutomation('govchain_proposal_enact', 'cron', 'failure', {
-              proposal_id: proposal.id,
-            }, 'Malformed execution_payload');
-          }
-          enacted++;
-        } else if (!passed) {
-          rejected++;
-        }
-
-        // 4. Broadcast result to DAO community channel
         const daoWebhook = process.env.DAO_COMMUNITY_WEBHOOK_URL;
         if (daoWebhook) {
-          const yesPercent = total > 0 ? ((yes / total) * 100).toFixed(1) : '0.0';
-          const statusEmoji = passed ? '✅' : '❌';
           await fetch(daoWebhook, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               content:
-                `${statusEmoji} **GovChain Proposal ${passed ? 'PASSED' : 'REJECTED'}**\n` +
-                `**Title**: ${proposal.title}\n` +
-                `**Result**: ${yesPercent}% YES (${yes} for / ${no} against)\n` +
-                `**Quorum**: ${quorumMet ? 'Met' : 'Not met'} (${total}/${quorum} votes)\n` +
-                `${passed ? '⚡ Changes will be applied automatically.' : '📋 Proposal archived. You can submit a revised version at govchain.us'}`,
+                `📋 **GovChain Proposal Expired**\n` +
+                `**Title**: ${p.title}\n` +
+                `**Agency**: ${p.agency}\n` +
+                `**Deadline passed**: ${p.deadline}\n` +
+                `Submit a new capability statement at govchain.us`,
             }),
           });
         }
       }
 
-      // 5. Surface any proposals that passed but were never enacted (data integrity check)
-      const { data: stuckPassed } = await admin
-        .from('governance_proposals')
-        .select('id, title')
-        .eq('status', 'passed')
-        .is('enacted_at', null)
-        .lte('end_time', nowIso);
+      // 2. Surface high-fit gov_opportunities with no matching proposal yet
+      const { data: highFitOpps } = await admin
+        .from('gov_opportunities')
+        .select('notice_id, title, agency, fit_score, deadline, sam_url')
+        .gte('fit_score', 75)
+        .gt('deadline', nowDate)
+        .limit(10);
 
-      if (stuckPassed && stuckPassed.length > 0) {
-        await logAutomation('govchain_enactment_backlog', 'cron', 'failure', {
-          stuck: stuckPassed.map((p) => p.id),
-        }, `${stuckPassed.length} passed proposals have no enacted_at timestamp`);
+      if (highFitOpps && highFitOpps.length > 0) {
+        const { data: existingProposals } = await admin
+          .from('gov_proposals')
+          .select('notice_id')
+          .in('notice_id', highFitOpps.map((o: { notice_id: string }) => o.notice_id));
+
+        const proposed = new Set((existingProposals ?? []).map((p: { notice_id: string }) => p.notice_id));
+        const unaddressed = highFitOpps.filter((o: { notice_id: string }) => !proposed.has(o.notice_id));
+
+        for (const opp of unaddressed) {
+          await logAutomation('govchain_unaddressed_opp', 'cron', 'success', {
+            notice_id: opp.notice_id,
+            title: opp.title,
+            fit_score: opp.fit_score,
+            deadline: opp.deadline,
+          });
+          surfaced++;
+        }
+
+        if (unaddressed.length > 0) {
+          const daoWebhook = process.env.DAO_COMMUNITY_WEBHOOK_URL;
+          if (daoWebhook) {
+            await fetch(daoWebhook, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                content:
+                  `🏛️ **GovChain — ${unaddressed.length} high-fit opportunities need proposals**\n` +
+                  unaddressed
+                    .slice(0, 3)
+                    .map((o: { title: string; agency: string; fit_score: number; deadline: string }) =>
+                      `• ${o.title} (${o.agency}) — score: ${o.fit_score}, deadline: ${o.deadline}`)
+                    .join('\n') +
+                  `\n\nDraft proposals at govchain.us`,
+              }),
+            });
+          }
+        }
       }
 
       await logAutomation(workflowName, 'cron', 'success', {
-        proposals_finalised: (closedProposals ?? []).length,
-        enacted,
-        rejected,
+        proposals_expired: expired,
+        opportunities_surfaced: surfaced,
       });
     } catch (err: unknown) {
       await logAutomation(workflowName, 'cron', 'failure', null, formatErr(err));
@@ -750,7 +730,7 @@ export class AutonomousController {
     const { data: qrons } = await admin
       .from('qrons')
       .select('*')
-      .order('createdAt', { ascending: false })
+      .order('created_at', { ascending: false })
       .limit(10);
 
     if (!qrons || qrons.length === 0) return;
@@ -765,7 +745,7 @@ export class AutonomousController {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: `Today's Featured QRON! ðŸŽ¨\n\nMode: ${showcase.mode}\nPrompt: ${showcase.prompt}\n\nCreate your own verified QR art at qron.space`,
-          media: { picture: showcase.imageUrl },
+          media: { picture: showcase.image_url },
         }),
       });
     }

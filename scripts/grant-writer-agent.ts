@@ -5,7 +5,7 @@ dotenv.config();
 /**
  * GOVCHAIN FEDERAL GRANT AUTOMATION AGENT
  * Uses Claude claude-sonnet-4-6 to draft tailored technical proposals for government grants.
- * Saves results to Supabase governance_proposals and optionally pushes to HubSpot CRM.
+ * Saves results to Supabase grant_applications and optionally pushes to HubSpot CRM.
  */
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -160,29 +160,27 @@ Write a 5-section proposal (Executive Summary, Technical Approach, Compliance, A
         continue;
       }
 
-      // Save to governance_proposals
+      // Save to grant_applications
       if (admin) {
-        const endTime = new Date(grant.deadline);
-        const { error } = await admin.from('governance_proposals').upsert({
-          id: `grant_${grant.id}`,
-          title: grant.title,
-          description: proposalBody,
+        const { error } = await admin.from('grant_applications').upsert({
+          program: grant.title,
+          agency: grant.agency,
+          category: 'federal',
+          amount_min: Number(grant.value.replace(/[^0-9]/g, '')),
+          amount_max: Number(grant.value.replace(/[^0-9]/g, '')),
+          deadline: grant.deadline,
+          contact_email: grant.contact_email,
           status: 'draft',
-          yes_votes: 0,
-          no_votes: 0,
-          quorum_required: 0,
-          pass_threshold: 100,
-          end_time: endTime.toISOString(),
-          execution_payload: JSON.stringify({ type: 'grant', value: grant.value, agency: grant.agency }),
+          notes: proposalBody,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-        }, { onConflict: 'id' });
+        }, { onConflict: 'program,agency' });
 
         if (error) {
           console.warn(`   ⚠️  Supabase upsert failed: ${error.message}`);
         } else {
           saved++;
-          console.log(`   💾 Saved to governance_proposals (id: grant_${grant.id})`);
+          console.log(`   💾 Saved to grant_applications (${grant.id})`);
         }
       }
 
