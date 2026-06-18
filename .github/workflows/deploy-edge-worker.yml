@@ -12,7 +12,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -31,3 +31,54 @@ jobs:
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # ── Post-deploy health verification ──────────────────────────────────
+      # Polls the edge worker /api/health endpoint after deployment with
+      # exponential backoff. Fails the workflow (triggering GitHub notification)
+      # if the worker is unhealthy after 5 attempts.
+      - name: Verify edge worker health
+        env:
+          WORKER_URL: ${{ secrets.QRON_WORKER_URL }}
+        run: |
+          WORKER_URL="${WORKER_URL:-https://qron-ai-api.undone-k.workers.dev}"
+          echo "Checking $WORKER_URL/api/health"
+          MAX=5
+          DELAY=4
+          for i in $(seq 1 $MAX); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$WORKER_URL/api/health" --max-time 10 || echo "000")
+            echo "Attempt $i/$MAX — HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Edge worker is healthy."
+              exit 0
+            fi
+            if [ "$i" -lt "$MAX" ]; then
+              echo "Not healthy yet. Waiting ${DELAY}s..."
+              sleep $DELAY
+              DELAY=$((DELAY * 2))
+            fi
+          done
+          echo "::error::Edge worker failed health check after $MAX attempts."
+          exit 1
+
+      # ── Self-heal trigger on deployment (clears stale circuit breakers) ──
+      - name: Trigger app self-heal after deploy
+        env:
+          APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          APP_URL="${APP_URL:-https://qron.space}"
+          if [ -z "$CRON_SECRET" ]; then
+            echo "CRON_SECRET not set — skipping self-heal trigger."
+            exit 0
+          fi
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{"resetBreakers":true,"retriggerCycle":false}' \
+            "$APP_URL/api/automation/heal" \
+            --max-time 30 || echo "000")
+          echo "Self-heal response: HTTP $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::Self-heal endpoint returned $STATUS (non-fatal)"
+          fi

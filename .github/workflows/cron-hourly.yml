@@ -1,0 +1,29 @@
+name: Hourly Lead Processing
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # every hour
+  workflow_dispatch:        # allow manual trigger
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger hourly cycle
+        env:
+          APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          APP_URL="${APP_URL:-https://qron.space}"
+          STATUS=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$APP_URL/api/automation/cron-hourly" \
+            --max-time 30)
+          cat /tmp/resp.json
+          echo ""
+          echo "HTTP $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::Hourly cycle returned $STATUS"
+            exit 1
+          fi
