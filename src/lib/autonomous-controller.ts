@@ -671,7 +671,7 @@ export class AutonomousController {
    * 1. Process Pending Leads: Sync new signups to HubSpot and trigger sequences.
    */
   private async processPendingLeads() {
-    const { data: leads } = await admin
+    const { data: leads } = await getSupabaseAdmin()
       .from('lead_captures')
       .select('*')
       .eq('status', 'new')
@@ -723,7 +723,7 @@ export class AutonomousController {
    */
   private async generateSocialShowcase() {
     // Select a highly-scanned QRON from the last 7 days
-    const { data: qrons } = await admin
+    const { data: qrons } = await getSupabaseAdmin()
       .from('qrons')
       .select('*')
       .order('created_at', { ascending: false })
@@ -760,18 +760,18 @@ export class AutonomousController {
     // Fetch 24h stats
     const past24h = new Date(Date.now() - 86400000).toISOString();
     
-    const { count: newLeads } = await admin
+    const { count: newLeads } = await getSupabaseAdmin()
       .from('lead_captures')
       .select('*', { count: 'exact', head: true })
       .gte('created_at', past24h);
 
-    const { count: gens } = await admin
+    const { count: gens } = await getSupabaseAdmin()
       .from('qron_generations')
       .select('*', { count: 'exact', head: true })
       .gte('created_at', past24h);
 
     // Fetch failed workflows in last 24h, grouped by name
-    const { data: failureRows } = await admin
+    const { data: failureRows } = await getSupabaseAdmin()
       .from('automation_logs')
       .select('workflow_name, error_message, created_at')
       .eq('status', 'failure')
@@ -1015,7 +1015,7 @@ export class AutonomousController {
     try {
       // Determine adaptive batch size from current queue depth
       const { count: pendingLeads } = await cb.exec(() =>
-        admin
+        getSupabaseAdmin()
           .from('lead_captures')
           .select('*', { count: 'exact', head: true })
           .eq('status', 'new')
@@ -1038,7 +1038,7 @@ export class AutonomousController {
 
   private async processLeadBatch(limit: number) {
     const cb = getCircuitBreaker('hubspot');
-    const { data: leads } = await admin
+    const { data: leads } = await getSupabaseAdmin()
       .from('lead_captures')
       .select('*')
       .eq('status', 'new')
@@ -1085,7 +1085,7 @@ export class AutonomousController {
 
   private async validateRecentReferrals() {
     const since = new Date(Date.now() - 3_600_000).toISOString();
-    const { data: refs } = await admin
+    const { data: refs } = await getSupabaseAdmin()
       .from('referrals')
       .select('*')
       .eq('status', 'tracked')

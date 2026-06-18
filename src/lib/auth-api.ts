@@ -30,7 +30,7 @@ export async function verifyApiKey(apiKey: string): Promise<string | null> {
   if (!match) return null;
 
   // 4. Update last used (fire and forget)
-  admin
+  getSupabaseAdmin()
     .from('api_keys')
     .update({ last_used_at: new Date().toISOString() })
     .eq('key_hash', incomingHash)
