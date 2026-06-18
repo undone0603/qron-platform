@@ -20,11 +20,11 @@ type DemoQRON = {
 export function FeaturedQRONs() {
   const [demoQrons, setDemoQrons] = useState<DemoQRON[]>([]);
   const [loading, setLoading] = useState(true);
-  const supabase = createClient();
 
   useEffect(() => {
     const fetchDemoQrons = async () => {
       try {
+        const supabase = createClient();
         const { data, error } = await supabase
           .from('qrons')
           .select('*')
@@ -42,7 +42,7 @@ export function FeaturedQRONs() {
     };
 
     fetchDemoQrons();
-  }, [supabase]);
+  }, []);
 
   if (loading) {
     return (
