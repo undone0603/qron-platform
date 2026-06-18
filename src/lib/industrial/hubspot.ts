@@ -2,7 +2,6 @@ import { generateLivingQR } from '../hf-generation';
 import { anchorEdgeHash } from '../blockchain';
 import { getSupabaseAdmin } from '../supabase-admin';
 
-const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 /**
  * HUBSPOT DEAL & DELIVERABLE AGENT
@@ -110,7 +109,7 @@ export class HubSpotDeliverableAgent {
       await this.updateHubSpotDeal(deal.id, artifactUrl);
 
       // 4. Log Success
-      await admin.from('automation_logs').insert({
+      await getSupabaseAdmin().from('automation_logs').insert({
         workflow_name: 'hubspot_deliverable_delivered',
         trigger_type: 'event',
         status: 'success',

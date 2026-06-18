@@ -6,7 +6,6 @@ import { getSupabaseAdmin } from '@/lib/supabase-admin';
 
 export const dynamic = 'force-dynamic';
 
-const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 /**
  * POST /api/automation/heal
@@ -45,7 +44,7 @@ export async function POST(request: Request) {
   const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
 
   // ── 1. Find repeatedly-failing workflows ──────────────────────────────────
-  const { data: failRows, error } = await admin
+  const { data: failRows, error } = await getSupabaseAdmin()
     .from('automation_logs')
     .select('workflow_name, error_message, created_at')
     .eq('status', 'failure')

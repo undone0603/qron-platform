@@ -8,7 +8,6 @@
 import crypto from 'node:crypto';
 import { getSupabaseAdmin } from './supabase-admin';
 
-const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 export type WebhookEvent = 'qron_scanned' | 'security_anomaly' | 'certification_approved';
 
@@ -18,7 +17,7 @@ export type WebhookEvent = 'qron_scanned' | 'security_anomaly' | 'certification_
 export async function dispatchWebhook(userId: string, eventType: WebhookEvent, payload: unknown) {
   try {
     // 1. Fetch brand for this user
-    const { data: brand } = await admin
+    const { data: brand } = await getSupabaseAdmin()
       .from('brands')
       .select('id')
       .eq('user_id', userId)
@@ -27,7 +26,7 @@ export async function dispatchWebhook(userId: string, eventType: WebhookEvent, p
     if (!brand) return;
 
     // 2. Fetch active subscriptions for this brand
-    const { data: subs } = await admin
+    const { data: subs } = await getSupabaseAdmin()
       .from('brand_webhooks')
       .select('*')
       .eq('brand_id', brand.id)

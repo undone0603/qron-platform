@@ -11,7 +11,6 @@ function getAdmin() {
   }
   return _admin;
 }
-const admin = { from: (...args: Parameters<ReturnType<typeof createClient>['from']>) => getAdmin().from(...args) };
 
 /**
  * Capture an arbitrary thrown value as a useful string. Handles JS Errors,
@@ -42,7 +41,7 @@ export async function logAutomation(
   errorMessage?: string
 ) {
   try {
-    await admin.from('automation_logs').insert({
+    await getAdmin().from('automation_logs').insert({
       workflow_name: workflowName,
       trigger_type: triggerType,
       status,
@@ -140,12 +139,12 @@ export async function runDailyMaintenance() {
     const _reportEmail = process.env.ADMIN_EMAIL || 'undone.k@gmail.com';
     
     // Fetch stats for the last 24h
-    const { count: generations } = await admin
+    const { count: generations } = await getAdmin()
       .from('qron_generations')
       .select('*', { count: 'exact', head: true })
       .gte('created_at', new Date(Date.now() - 86400000).toISOString());
 
-    const { count: leads } = await admin
+    const { count: leads } = await getAdmin()
       .from('lead_captures')
       .select('*', { count: 'exact', head: true })
       .gte('created_at', new Date(Date.now() - 86400000).toISOString());

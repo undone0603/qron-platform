@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 
-const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -61,7 +60,7 @@ export async function POST(req: NextRequest) {
     const data = await res.json();
 
     // 3. Log Success to Supabase
-    await admin.from('automation_logs').insert({
+    await getSupabaseAdmin().from('automation_logs').insert({
       workflow_name: 'hubspot_sync',
       trigger_type: 'event',
       status: 'success',
@@ -73,7 +72,7 @@ export async function POST(req: NextRequest) {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[CRM-Sync] Critical Failure:', err);
-    await admin.from('automation_logs').insert({
+    await getSupabaseAdmin().from('automation_logs').insert({
       workflow_name: 'hubspot_sync',
       trigger_type: 'event',
       status: 'failure',

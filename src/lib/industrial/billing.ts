@@ -18,7 +18,6 @@ function getAdmin() {
   }
   return _admin;
 }
-const admin = { from: (...args: Parameters<ReturnType<typeof createClient>['from']>) => getAdmin().from(...args) };
 
 /**
  * BILLING CONFIGURATION
@@ -43,7 +42,7 @@ export async function reportAgentUsage(userId: string, toolName: keyof typeof ME
     console.log(`[Billing] Reporting usage for ${userId}: ${toolName}`);
 
     // 1. Get the user's active metered subscription item
-    const { data: profile } = await admin
+    const { data: profile } = await getAdmin()
       .from('profiles')
       .select('stripe_subscription_id, tier')
       .eq('user_id', userId)
@@ -87,7 +86,7 @@ export async function reportAgentUsage(userId: string, toolName: keyof typeof ME
     });
 
     // 4. Log to DB for internal analytics
-    await admin.from('automation_logs').insert({
+    await getAdmin().from('automation_logs').insert({
       workflow_name: 'metered_usage_reported',
       trigger_type: 'event',
       status: 'success',
@@ -99,7 +98,7 @@ export async function reportAgentUsage(userId: string, toolName: keyof typeof ME
   } catch (err) {
     console.error('[Billing] Reporting failed:', err);
     // Non-blocking log
-    admin.from('automation_logs').insert({
+    getAdmin().from('automation_logs').insert({
       workflow_name: 'metered_usage_reported',
       trigger_type: 'event',
       status: 'failure',

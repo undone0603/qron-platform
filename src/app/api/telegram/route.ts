@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { generateLivingQR } from '@/lib/hf-generation';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 
-const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -45,7 +44,7 @@ export async function POST(req: NextRequest) {
 
         await sendTelegramPhoto(chatId, result.imageUrl, `âœ… Your QRON is ready!\n\nðŸ”’ Ed25519 Secured\nðŸ”— Target: ${text}`);
 
-        await admin.from('automation_logs').insert({
+        await getSupabaseAdmin().from('automation_logs').insert({
           workflow_name: 'telegram_qron_generation',
           trigger_type: 'event',
           status: 'success',
@@ -53,7 +52,7 @@ export async function POST(req: NextRequest) {
         });
       } catch (err) {
         console.error('[Telegram] Generation failed:', err);
-        await admin.from('automation_logs').insert({
+        await getSupabaseAdmin().from('automation_logs').insert({
           workflow_name: 'telegram_qron_generation',
           trigger_type: 'event',
           status: 'failure',
@@ -72,7 +71,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[Telegram] Webhook error:', err);
-    await admin.from('automation_logs').insert({
+    await getSupabaseAdmin().from('automation_logs').insert({
       workflow_name: 'telegram_webhook',
       trigger_type: 'event',
       status: 'failure',

@@ -5,7 +5,6 @@ import { generateLivingQR } from '@/lib/hf-generation';
 import { logAutomation } from '@/lib/automation';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 
-const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -73,7 +72,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 4. Log and Track (Non-blocking)
-    admin.from('qrons').insert({
+    getSupabaseAdmin().from('qrons').insert({
       user_id: userId,
       mode: mode,
       target_url: url,

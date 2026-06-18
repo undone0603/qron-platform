@@ -3,7 +3,6 @@ import { getSupabaseAdmin } from '@/lib/supabase-admin';
 
 export const dynamic = 'force-dynamic';
 
-const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -15,7 +14,7 @@ export async function GET(request: Request) {
 
   try {
     // 1. Fetch Aggregated Revenue & Tokenomics Stats
-    const { data: fees } = await admin.from('fee_flows').select('*');
+    const { data: fees } = await getSupabaseAdmin().from('fee_flows').select('*');
 
     const totals = (fees || []).reduce(
       (acc, f) => ({
@@ -29,12 +28,12 @@ export async function GET(request: Request) {
     );
 
     // 2. Fetch Lead Stats
-    const { count: leadCount } = await admin
+    const { count: leadCount } = await getSupabaseAdmin()
       .from('lead_captures')
       .select('*', { count: 'exact', head: true });
 
     // 3. Fetch Brand Tiers
-    const { data: brands } = await admin
+    const { data: brands } = await getSupabaseAdmin()
       .from('brands')
       .select('staking_tier, id');
     

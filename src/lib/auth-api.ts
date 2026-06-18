@@ -1,6 +1,5 @@
 import { getSupabaseAdmin } from './supabase-admin';
 
-const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 /**
  * Verify an industrial API key.
@@ -12,7 +11,7 @@ export async function verifyApiKey(apiKey: string): Promise<string | null> {
   const prefix = apiKey.substring(0, 10);
 
   // 1. Find keys by prefix
-  const { data: keys, error } = await admin
+  const { data: keys, error } = await getSupabaseAdmin()
     .from('api_keys')
     .select('user_id, key_hash, is_active')
     .eq('key_prefix', prefix)

@@ -5,7 +5,6 @@ import { anchorEdgeHash } from '@/lib/blockchain';
 import { logAutomation } from '@/lib/automation';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 
-const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -57,7 +56,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 5. Store Telemetry Event
-    const { data: event, error: dbError } = await admin
+    const { data: event, error: dbError } = await getSupabaseAdmin()
       .from('telemetry_events')
       .insert({
         user_id: userId,

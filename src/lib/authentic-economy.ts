@@ -1,6 +1,5 @@
 import { getSupabaseAdmin } from './supabase-admin';
 
-const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 export type StakingTier = 'none' | 'bronze' | 'silver' | 'gold' | 'platinum';
 
@@ -73,7 +72,7 @@ export async function processFeeFlow(params: {
 }) {
   try {
     // 1. Get brand staking info
-    const { data: brand } = await admin
+    const { data: brand } = await getSupabaseAdmin()
       .from('brands')
       .select('qron_staked')
       .eq('id', params.brandId)
@@ -83,7 +82,7 @@ export async function processFeeFlow(params: {
     const dist = calculateFeeDistribution(qronStaked);
 
     // 2. Insert fee_flow record
-    const { data: flow, error } = await admin
+    const { data: flow, error } = await getSupabaseAdmin()
       .from('fee_flows')
       .insert({
         brand_id: params.brandId,
@@ -148,7 +147,7 @@ async function triggerAutonomousExecution(flowId: string, dist: FeeDistribution)
     }
 
     // Mark confirmed
-    await admin
+    await getSupabaseAdmin()
       .from('fee_flows')
       .update({ status: 'confirmed', confirmed_at: new Date().toISOString() })
       .eq('id', flowId);
