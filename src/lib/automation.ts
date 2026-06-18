@@ -1,16 +1,5 @@
-import { createClient } from '@supabase/supabase-js';
+import { getSupabaseAdmin } from './supabase-admin';
 import { enrichLead } from './industrial/enrichment';
-
-let _admin: ReturnType<typeof createClient> | null = null;
-function getAdmin() {
-  if (!_admin) {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !key) throw new Error('Supabase env vars not set');
-    _admin = createClient(url, key);
-  }
-  return _admin;
-}
 
 /**
  * Capture an arbitrary thrown value as a useful string. Handles JS Errors,
@@ -41,7 +30,7 @@ export async function logAutomation(
   errorMessage?: string
 ) {
   try {
-    await getAdmin().from('automation_logs').insert({
+    await getSupabaseAdmin().from('automation_logs').insert({
       workflow_name: workflowName,
       trigger_type: triggerType,
       status,
@@ -139,12 +128,12 @@ export async function runDailyMaintenance() {
     const _reportEmail = process.env.ADMIN_EMAIL || 'undone.k@gmail.com';
     
     // Fetch stats for the last 24h
-    const { count: generations } = await getAdmin()
+    const { count: generations } = await getSupabaseAdmin()
       .from('qron_generations')
       .select('*', { count: 'exact', head: true })
       .gte('created_at', new Date(Date.now() - 86400000).toISOString());
 
-    const { count: leads } = await getAdmin()
+    const { count: leads } = await getSupabaseAdmin()
       .from('lead_captures')
       .select('*', { count: 'exact', head: true })
       .gte('created_at', new Date(Date.now() - 86400000).toISOString());

@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { createClient } from '@supabase/supabase-js';
+import { getSupabaseAdmin } from '../supabase-admin';
 
 // Pinned to legacy API version because subscriptionItems.createUsageRecord
 // is only available on pre-meterEvents Stripe API versions.
@@ -7,17 +7,6 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   apiVersion: '2025-01-27' as any,
 });
-
-let _admin: ReturnType<typeof createClient> | null = null;
-function getAdmin() {
-  if (!_admin) {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !key) throw new Error('Supabase env vars not set');
-    _admin = createClient(url, key);
-  }
-  return _admin;
-}
 
 /**
  * BILLING CONFIGURATION
@@ -42,7 +31,7 @@ export async function reportAgentUsage(userId: string, toolName: keyof typeof ME
     console.log(`[Billing] Reporting usage for ${userId}: ${toolName}`);
 
     // 1. Get the user's active metered subscription item
-    const { data: profile } = await getAdmin()
+    const { data: profile } = await getSupabaseAdmin()
       .from('profiles')
       .select('stripe_subscription_id, tier')
       .eq('user_id', userId)
@@ -86,7 +75,7 @@ export async function reportAgentUsage(userId: string, toolName: keyof typeof ME
     });
 
     // 4. Log to DB for internal analytics
-    await getAdmin().from('automation_logs').insert({
+    await getSupabaseAdmin().from('automation_logs').insert({
       workflow_name: 'metered_usage_reported',
       trigger_type: 'event',
       status: 'success',
@@ -98,7 +87,7 @@ export async function reportAgentUsage(userId: string, toolName: keyof typeof ME
   } catch (err) {
     console.error('[Billing] Reporting failed:', err);
     // Non-blocking log
-    getAdmin().from('automation_logs').insert({
+    getSupabaseAdmin().from('automation_logs').insert({
       workflow_name: 'metered_usage_reported',
       trigger_type: 'event',
       status: 'failure',
