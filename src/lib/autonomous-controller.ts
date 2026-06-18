@@ -432,8 +432,8 @@ export class AutonomousController {
           cert_id: cert.id,
           platform: 'strainchain_audit',
           listing_title: isExpired
-            ? `Cert expired: ${cert.name ?? cert.id} (issuer: ${cert.issuer})`
-            : `Cert expiring in ${daysLeft}d: ${cert.name ?? cert.id}`,
+            ? `Cert expired: ${cert.qron_id ?? cert.id} (issuer: ${cert.issuer})`
+            : `Cert expiring in ${daysLeft}d: ${cert.qron_id ?? cert.id}`,
           risk_score: isExpired ? 95 : 70,
           evidence: { cert_id: cert.id, issuer: cert.issuer, expires_at: cert.expires_at, qron_id: cert.qron_id },
           status: 'open',
