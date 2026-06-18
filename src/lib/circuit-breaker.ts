@@ -26,7 +26,7 @@ class CircuitBreaker {
     private cfg: CBConfig
   ) {}
 
-  async exec<T>(fn: () => Promise<T>): Promise<T> {
+  async exec<T>(fn: () => PromiseLike<T> | Promise<T>): Promise<T> {
     if (this.state === 'open') {
       if (Date.now() - this.openedAt >= this.cfg.timeoutMs) {
         this.state = 'half-open';
