@@ -93,7 +93,7 @@ export async function POST(req: NextRequest) {
     });
 
     // 5. Deduct Credits
-    admin.rpc('increment_generations_used', { user_id: userId }).then(undefined, (err) => {
+    getSupabaseAdmin().rpc('increment_generations_used', { user_id: userId }).then(undefined, (err) => {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[v1/generate] Failed to increment generations_used:', err);
       void logAutomation('v1_generate.credit_increment', 'event', 'failure', { userId }, msg);
