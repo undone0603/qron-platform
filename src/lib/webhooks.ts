@@ -5,12 +5,10 @@
  * @copyright (c) 2026 AuthiChain Inc. All rights reserved.
  */
 
-import { createClient } from '@supabase/supabase-js';
 import crypto from 'node:crypto';
+import { getSupabaseAdmin } from './supabase-admin';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const admin = createClient(supabaseUrl, serviceKey);
+const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 export type WebhookEvent = 'qron_scanned' | 'security_anomaly' | 'certification_approved';
 

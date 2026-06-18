@@ -1,15 +1,12 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
 import { logAutomation, formatErr } from '@/lib/automation';
 import { resetCircuitBreaker, getAllCircuitBreakerStatuses } from '@/lib/circuit-breaker';
 import { AutonomousController } from '@/lib/autonomous-controller';
+import { getSupabaseAdmin } from '@/lib/supabase-admin';
 
 export const dynamic = 'force-dynamic';
 
-const admin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+const admin = { from: (...args: Parameters<ReturnType<typeof getSupabaseAdmin>['from']>) => getSupabaseAdmin().from(...args) };
 
 /**
  * POST /api/automation/heal

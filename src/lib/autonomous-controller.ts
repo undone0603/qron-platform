@@ -1,14 +1,10 @@
-import { createClient } from '@supabase/supabase-js';
 import { logAutomation, formatErr } from './automation';
 import { dispatchWebhook } from './webhooks';
 import { HubSpotDeliverableAgent } from './industrial/hubspot';
 import { sendEmail } from './email';
 import { withRetry } from './retry';
 import { getCircuitBreaker, resetCircuitBreaker, getAllCircuitBreakerStatuses } from './circuit-breaker';
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const admin = createClient(supabaseUrl, serviceKey);
+import { getSupabaseAdmin } from './supabase-admin';
 
 /**
  * Returns an adaptive batch size based on how many items are pending.
@@ -33,7 +29,7 @@ export class AutonomousController {
     const workflowName = 'federal_drip_sequencer';
     try {
       // 1. Fetch "stuck" prospects or those needing FTC shield
-      const { data: prospects } = await admin
+      const { data: prospects } = await getSupabaseAdmin()
         .from('lead_captures')
         .select('*')
         .or('status.eq.new,status.eq.contacted')
@@ -73,7 +69,7 @@ export class AutonomousController {
         }
 
         sent++;
-        await admin
+        await getSupabaseAdmin()
           .from('lead_captures')
           .update({
             status: 'qualified',
@@ -150,7 +146,7 @@ export class AutonomousController {
     const workflowName = 'lead_drip_sequencer';
     try {
       const now = new Date().toISOString();
-      const { data: prospects } = await admin
+      const { data: prospects } = await getSupabaseAdmin()
         .from('drip_prospects')
         .select('*')
         .in('status', ['active', 'pending'])
@@ -169,7 +165,7 @@ export class AutonomousController {
         const nextSend = new Date();
         nextSend.setDate(nextSend.getDate() + 3);
 
-        await admin
+        await getSupabaseAdmin()
           .from('drip_prospects')
           .update({
             sequence_step: step,
@@ -244,7 +240,7 @@ export class AutonomousController {
     try {
       // 1. Fetch 24h revenue
       const past24h = new Date(Date.now() - 86400000).toISOString();
-      const { data: flows } = await admin
+      const { data: flows } = await getSupabaseAdmin()
         .from('fee_flows')
         .select('net_amount')
         .gte('created_at', past24h);
@@ -256,7 +252,7 @@ export class AutonomousController {
       const buybackAmount = totalRevenue * 0.20;
 
       // 3. Log Autonomous Buyback & Burn
-      await admin.from('fee_flows').insert({
+      await getSupabaseAdmin().from('fee_flows').insert({
         flow_type: 'buyback_burn',
         net_amount: -buybackAmount,
         burn_amount: buybackAmount,
@@ -279,7 +275,7 @@ export class AutonomousController {
     try {
       // 1. Fetch recent scans from the last 24h
       const past24h = new Date(Date.now() - 86400000).toISOString();
-      const { data: scans } = await admin
+      const { data: scans } = await getSupabaseAdmin()
         .from('scan_events')
         .select(`
           id, qron_id, country, city, ip_address, scanned_at,
@@ -302,7 +298,7 @@ export class AutonomousController {
         if (isForeignScan) {
           // 3. Log Geographic Drift Anomaly to scout_alerts
           const userId = (scan.qrons as { user_id?: string } | null)?.user_id;
-          await admin.from('scout_alerts').insert({
+          await getSupabaseAdmin().from('scout_alerts').insert({
             platform: 'geo_watchdog',
             listing_title: `Geo drift: QRON-${scan.qron_id} scanned in ${scan.country}`,
             risk_score: 85,
@@ -366,7 +362,7 @@ export class AutonomousController {
       const tomorrowDate = tomorrow.slice(0, 10);
       const nowDate = now.slice(0, 10);
 
-      const { data: proposals } = await admin
+      const { data: proposals } = await getSupabaseAdmin()
         .from('gov_proposals')
         .select('notice_id, title, agency, fit_score, deadline, status, govchain_url')
         .in('status', ['draft', 'submitted'])
@@ -416,7 +412,7 @@ export class AutonomousController {
       let anomalies = 0;
 
       // 1. Find certifications expiring within 30 days or already expired
-      const { data: expiring } = await admin
+      const { data: expiring } = await getSupabaseAdmin()
         .from('certifications')
         .select('id, qron_id, issuer, status, metadata, expires_at')
         .lte('expires_at', in30Days)
@@ -428,7 +424,7 @@ export class AutonomousController {
           ? Math.ceil((new Date(cert.expires_at).getTime() - now.getTime()) / 86_400_000)
           : 0;
 
-        await admin.from('scout_alerts').insert({
+        await getSupabaseAdmin().from('scout_alerts').insert({
           cert_id: cert.id,
           platform: 'strainchain_audit',
           listing_title: isExpired
@@ -445,14 +441,14 @@ export class AutonomousController {
 
       // 2. Detect quarantine events in supply_chain_events in the last 24h
       const past24h = new Date(now.getTime() - 86_400_000).toISOString();
-      const { data: quarantineEvents } = await admin
+      const { data: quarantineEvents } = await getSupabaseAdmin()
         .from('supply_chain_events')
         .select('id, product_id, event_type, metadata, created_at')
         .eq('event_type', 'quarantine')
         .gte('created_at', past24h);
 
       for (const evt of quarantineEvents ?? []) {
-        await admin.from('scout_alerts').insert({
+        await getSupabaseAdmin().from('scout_alerts').insert({
           product_id: evt.product_id,
           platform: 'strainchain_audit',
           listing_title: `Quarantine event: product ${evt.product_id}`,
@@ -465,14 +461,14 @@ export class AutonomousController {
       }
 
       // 3. Find industrial QRONs that have no certification at all
-      const { data: industrialQrons } = await admin
+      const { data: industrialQrons } = await getSupabaseAdmin()
         .from('qrons')
         .select('id, user_id')
         .eq('mode', 'industrial')
         .limit(200);
 
       if (industrialQrons && industrialQrons.length > 0) {
-        const { data: certifiedIds } = await admin
+        const { data: certifiedIds } = await getSupabaseAdmin()
           .from('certifications')
           .select('qron_id')
           .neq('status', 'revoked')
@@ -482,7 +478,7 @@ export class AutonomousController {
         const uncertified = industrialQrons.filter((q: { id: number }) => !certified.has(q.id));
 
         for (const q of uncertified) {
-          await admin.from('scout_alerts').insert({
+          await getSupabaseAdmin().from('scout_alerts').insert({
             platform: 'strainchain_audit',
             listing_title: `Uncertified industrial QRON: ${q.id}`,
             risk_score: 75,
@@ -536,14 +532,14 @@ export class AutonomousController {
       let surfaced = 0;
 
       // 1. Mark overdue draft/submitted proposals as expired
-      const { data: overdueProposals } = await admin
+      const { data: overdueProposals } = await getSupabaseAdmin()
         .from('gov_proposals')
         .select('notice_id, title, agency, deadline, status')
         .in('status', ['draft', 'submitted'])
         .lt('deadline', nowDate);
 
       for (const p of overdueProposals ?? []) {
-        await admin
+        await getSupabaseAdmin()
           .from('gov_proposals')
           .update({ status: 'expired' })
           .eq('notice_id', p.notice_id);
@@ -567,7 +563,7 @@ export class AutonomousController {
       }
 
       // 2. Surface high-fit gov_opportunities with no matching proposal yet
-      const { data: highFitOpps } = await admin
+      const { data: highFitOpps } = await getSupabaseAdmin()
         .from('gov_opportunities')
         .select('notice_id, title, agency, fit_score, deadline, sam_url')
         .gte('fit_score', 75)
@@ -575,7 +571,7 @@ export class AutonomousController {
         .limit(10);
 
       if (highFitOpps && highFitOpps.length > 0) {
-        const { data: existingProposals } = await admin
+        const { data: existingProposals } = await getSupabaseAdmin()
           .from('gov_proposals')
           .select('notice_id')
           .in('notice_id', highFitOpps.map((o: { notice_id: string }) => o.notice_id));
@@ -632,7 +628,7 @@ export class AutonomousController {
     const workflowName = 'qron_story_sync';
     try {
       const now = new Date().toISOString();
-      const { data: schedules, error: fetchErr } = await admin
+      const { data: schedules, error: fetchErr } = await getSupabaseAdmin()
         .from('living_art_schedules')
         .select('id, qron_id, images, last_run_at')
         .eq('is_active', true)
@@ -652,12 +648,12 @@ export class AutonomousController {
         const nextUrl = typeof next === 'string' ? next : next?.url;
         if (!nextUrl) continue;
 
-        await admin
+        await getSupabaseAdmin()
           .from('qrons')
           .update({ image_url: nextUrl, updated_at: now })
           .eq('id', schedule.qron_id);
 
-        await admin
+        await getSupabaseAdmin()
           .from('living_art_schedules')
           .update({ last_run_at: now, updated_at: now })
           .eq('id', schedule.id);
@@ -708,7 +704,7 @@ export class AutonomousController {
         // Update local status with score
         const score = lead.product_interest === 'authichain' ? 80 : 20; // Enterprise leads score higher
         
-        await admin
+        await getSupabaseAdmin()
           .from('lead_captures')
           .update({ 
             status: 'contacted', 
@@ -857,7 +853,7 @@ export class AutonomousController {
   private async executeTokenomicsDaily() {
     try {
       // Fetch unconfirmed staker rewards
-      const { data: pendingRewards } = await admin
+      const { data: pendingRewards } = await getSupabaseAdmin()
         .from('fee_flows')
         .select('*')
         .eq('flow_type', 'staking_reward')
@@ -872,7 +868,7 @@ export class AutonomousController {
 
       // In a real scenario, this triggers the on-chain distribution contract
       // For now, we simulate and mark as confirmed
-      await admin
+      await getSupabaseAdmin()
         .from('fee_flows')
         .update({ status: 'confirmed', confirmed_at: new Date().toISOString() })
         .in(
@@ -894,7 +890,7 @@ export class AutonomousController {
    */
   private async processAffiliatePayouts() {
     try {
-      const { data: pendingReferrals } = await admin
+      const { data: pendingReferrals } = await getSupabaseAdmin()
         .from('referrals')
         .select('*')
         .eq('status', 'tracked');
@@ -904,7 +900,7 @@ export class AutonomousController {
       // Logic to move 'tracked' to 'validated' after 30-day cookie window
       // For now, we simulate validation and queue for payout
       for (const ref of pendingReferrals) {
-        await admin
+        await getSupabaseAdmin()
           .from('affiliate_payouts')
           .insert({
             affiliate_id: ref.affiliateId,
@@ -912,7 +908,7 @@ export class AutonomousController {
             status: 'pending',
           });
         
-        await admin
+        await getSupabaseAdmin()
           .from('referrals')
           .update({ status: 'validated' })
           .eq('id', ref.id);
@@ -1077,7 +1073,7 @@ export class AutonomousController {
         }
 
         const score = lead.product_interest === 'authichain' ? 80 : 20;
-        await admin
+        await getSupabaseAdmin()
           .from('lead_captures')
           .update({ status: 'contacted', score, updated_at: new Date().toISOString() })
           .eq('id', lead.id);
@@ -1099,10 +1095,10 @@ export class AutonomousController {
     if (!refs || refs.length === 0) return;
 
     for (const ref of refs) {
-      await admin
+      await getSupabaseAdmin()
         .from('affiliate_payouts')
         .insert({ affiliate_id: ref.affiliateId, amount: ref.commissionEarned, status: 'pending' });
-      await admin.from('referrals').update({ status: 'validated' }).eq('id', ref.id);
+      await getSupabaseAdmin().from('referrals').update({ status: 'validated' }).eq('id', ref.id);
     }
   }
 
@@ -1122,7 +1118,7 @@ export class AutonomousController {
     const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
 
     try {
-      const { data: rows } = await admin
+      const { data: rows } = await getSupabaseAdmin()
         .from('automation_logs')
         .select('workflow_name, status, created_at')
         .gte('created_at', since)
@@ -1201,9 +1197,9 @@ export class AutonomousController {
     const since24h = new Date(Date.now() - 86_400_000).toISOString();
 
     const [{ count: fails1h }, { count: fails24h }, { count: successCount }] = await Promise.all([
-      admin.from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'failure').gte('created_at', since1h),
-      admin.from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'failure').gte('created_at', since24h),
-      admin.from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'success').gte('created_at', since24h),
+      getSupabaseAdmin().from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'failure').gte('created_at', since1h),
+      getSupabaseAdmin().from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'failure').gte('created_at', since24h),
+      getSupabaseAdmin().from('automation_logs').select('*', { count: 'exact', head: true }).eq('status', 'success').gte('created_at', since24h),
     ]);
 
     return {
