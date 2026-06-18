@@ -3,10 +3,14 @@ import { getSupabaseAdmin } from '../supabase-admin';
 
 // Pinned to legacy API version because subscriptionItems.createUsageRecord
 // is only available on pre-meterEvents Stripe API versions.
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  apiVersion: '2025-01-27' as any,
-});
+let _stripe: Stripe | null = null;
+function getStripe(): Stripe {
+  if (!_stripe) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    _stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-01-27' as any });
+  }
+  return _stripe;
+}
 
 /**
  * BILLING CONFIGURATION
@@ -46,7 +50,7 @@ export async function reportAgentUsage(userId: string, toolName: keyof typeof ME
     if (profile.tier === 'free') return;
 
     // 2. Find the metered subscription item
-    const subscription = await stripe.subscriptions.retrieve(profile.stripe_subscription_id);
+    const subscription = await getStripe().subscriptions.retrieve(profile.stripe_subscription_id);
     const meteredItem = subscription.items.data.find(item => 
       item.price.recurring?.usage_type === 'metered'
     );
@@ -59,7 +63,7 @@ export async function reportAgentUsage(userId: string, toolName: keyof typeof ME
     // 3. Report usage units based on tool value
     const quantity = METERED_PRICING[toolName] || 1;
 
-    const legacyStripe = stripe as unknown as {
+    const legacyStripe = getStripe() as unknown as {
       subscriptionItems: {
         createUsageRecord: (
           id: string,
