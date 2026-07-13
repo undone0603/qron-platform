@@ -30,8 +30,6 @@ export function APIKeyManager({ userId }: { userId: string }) {
   const [newKey, setNewKey] = useState<string | null>(null);
   const [copying, setCopying] = useState<string | null>(null);
   const [showQuickStart, setShowQuickStart] = useState(false);
-  const supabase = createClient();
-
   const snippets = {
     curl: `curl -X POST https://qron.space/api/v1/generate \\
   -H "X-API-Key: ${newKey || 'YOUR_API_KEY'}" \\
@@ -50,6 +48,8 @@ export function APIKeyManager({ userId }: { userId: string }) {
   };
 
   const fetchKeys = useCallback(async () => {
+    const supabase = createClient();
+    if (!supabase) { setLoading(false); return; }
     setLoading(true);
     const { data, error } = await supabase
       .from('api_keys')
@@ -59,7 +59,7 @@ export function APIKeyManager({ userId }: { userId: string }) {
 
     if (!error) setKeys((data || []) as APIKey[]);
     setLoading(false);
-  }, [userId, supabase]);
+  }, [userId]);
 
   useEffect(() => {
     startTransition(() => {
@@ -85,6 +85,8 @@ export function APIKeyManager({ userId }: { userId: string }) {
   }
 
   async function revokeKey(id: string) {
+    const supabase = createClient();
+    if (!supabase) return;
     const { error } = await supabase
       .from('api_keys')
       .delete()

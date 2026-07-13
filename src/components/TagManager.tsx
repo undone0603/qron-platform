@@ -29,9 +29,9 @@ export function TagManager({ userId, onTagSelected }: TagManagerProps) {
   const [newTagName, setNewTagName] = useState('');
   const [editingTagId, setEditingTagId] = useState<string | null>(null);
   const [editingTagName, setEditingTagName] = useState('');
-  const supabase = createClient();
-
   const fetchTags = useCallback(async (showLoading = true) => {
+    const supabase = createClient();
+    if (!supabase) { setLoading(false); return; }
     if (showLoading) setLoading(true);
     const { data, error } = await supabase
       .from('tags')
@@ -46,7 +46,7 @@ export function TagManager({ userId, onTagSelected }: TagManagerProps) {
       setTags((data || []) as Tag[]);
     }
     setLoading(false);
-  }, [userId, supabase]);
+  }, [userId]);
 
   useEffect(() => {
     startTransition(() => {
@@ -59,6 +59,8 @@ export function TagManager({ userId, onTagSelected }: TagManagerProps) {
       toast.error('Tag name cannot be empty.');
       return;
     }
+    const supabase = createClient();
+    if (!supabase) return;
     setLoading(true);
     const { error } = await supabase
       .from('tags')
@@ -79,6 +81,8 @@ export function TagManager({ userId, onTagSelected }: TagManagerProps) {
       toast.error('Tag name cannot be empty.');
       return;
     }
+    const supabase = createClient();
+    if (!supabase) return;
     setLoading(true);
     const { error } = await supabase
       .from('tags')
@@ -99,6 +103,8 @@ export function TagManager({ userId, onTagSelected }: TagManagerProps) {
   };
 
   const handleDeleteTag = async (tagId: string) => {
+    const supabase = createClient();
+    if (!supabase) return;
     setLoading(true);
     const { error } = await supabase
       .from('tags')

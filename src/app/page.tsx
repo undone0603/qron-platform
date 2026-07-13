@@ -32,10 +32,7 @@ const StaticImageGallery = dynamic(
 );
 
 export default function Home() {
-  const hasSupabaseEnv =
-    Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL) &&
-    Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
-  const supabase = hasSupabaseEnv ? createClient() : null;
+  const supabase = createClient();
 
   const [targetUrl, setTargetUrl] = useState('');
   const [prompt, setPrompt] = useState('');

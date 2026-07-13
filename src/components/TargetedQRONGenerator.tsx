@@ -38,8 +38,6 @@ export function TargetedQRONGenerator({
   );
   const [error, setError] = useState<string | null>(null);
 
-  const supabase = createClient();
-
   const isTierSufficient = (required: string) => {
     if (required === 'free') return true;
     if (
@@ -82,6 +80,12 @@ export function TargetedQRONGenerator({
 
     setIsGenerating(true);
     try {
+      const supabase = createClient();
+      if (!supabase) {
+        setError('Supabase is not configured');
+        setIsGenerating(false);
+        return;
+      }
       const {
         data: { session },
       } = await supabase.auth.getSession();

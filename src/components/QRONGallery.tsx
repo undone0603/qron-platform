@@ -28,7 +28,6 @@ export function QRONGallery({
 }: QRONGalleryProps) {
   const [qrons, setQrons] = useState<QRONEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const supabase = createClient();
   const [user, setUser] = useState<User | null>(() => {
     if (currentUserId) return { id: currentUserId } as User;
     return null;
@@ -37,6 +36,8 @@ export function QRONGallery({
   useEffect(() => {
     if (!currentUserId) {
       const fetchUser = async () => {
+        const supabase = createClient();
+        if (!supabase) return;
         const {
           data: { user: authUser },
         } = await supabase.auth.getUser();
@@ -44,10 +45,12 @@ export function QRONGallery({
       };
       fetchUser();
     }
-  }, [supabase, currentUserId]);
+  }, [currentUserId]);
 
   const fetchQRONs = useCallback(async () => {
     if (!user && !currentUserId) return;
+    const supabase = createClient();
+    if (!supabase) { setLoading(false); return; }
     setLoading(true);
     try {
       let query = supabase.from('qrons').select('*, qron_tags(tag_id)');
@@ -85,7 +88,7 @@ export function QRONGallery({
     } finally {
       setLoading(false);
     }
-  }, [supabase, user, currentUserId, selectedFolderId, selectedTagId]);
+  }, [user, currentUserId, selectedFolderId, selectedTagId]);
 
   useEffect(() => {
     startTransition(() => {

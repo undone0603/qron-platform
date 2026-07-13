@@ -33,9 +33,9 @@ export function FolderManager({
   const [newFolderName, setNewFolderName] = useState('');
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [editingFolderName, setEditingFolderName] = useState('');
-  const supabase = createClient();
-
   const fetchFolders = useCallback(async (showLoading = true) => {
+    const supabase = createClient();
+    if (!supabase) { setLoading(false); return; }
     if (showLoading) setLoading(true);
     const { data, error } = await supabase
       .from('folders')
@@ -50,7 +50,7 @@ export function FolderManager({
       setFolders((data || []) as Folder[]);
     }
     setLoading(false);
-  }, [userId, supabase]);
+  }, [userId]);
 
   useEffect(() => {
     startTransition(() => {
@@ -63,6 +63,8 @@ export function FolderManager({
       toast.error('Folder name cannot be empty.');
       return;
     }
+    const supabase = createClient();
+    if (!supabase) return;
     setLoading(true);
     const { error } = await supabase
       .from('folders')
@@ -83,6 +85,8 @@ export function FolderManager({
       toast.error('Folder name cannot be empty.');
       return;
     }
+    const supabase = createClient();
+    if (!supabase) return;
     setLoading(true);
     const { error } = await supabase
       .from('folders')
@@ -103,6 +107,8 @@ export function FolderManager({
   };
 
   const handleDeleteFolder = async (folderId: string) => {
+    const supabase = createClient();
+    if (!supabase) return;
     setLoading(true);
     const { error } = await supabase
       .from('folders')

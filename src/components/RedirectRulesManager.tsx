@@ -52,9 +52,9 @@ export function RedirectRulesManager({
     a_b_variant: null,
     a_b_weight: 1,
   });
-  const supabase = createClient();
-
   const fetchRules = useCallback(async (showLoading = true) => {
+    const supabase = createClient();
+    if (!supabase) { setLoading(false); return; }
     if (showLoading) setLoading(true);
     const { data, error } = await supabase
       .from('redirect_rules')
@@ -78,11 +78,13 @@ export function RedirectRulesManager({
       setRules(formattedData as RedirectRule[]);
     }
     setLoading(false);
-  }, [qronId, supabase]);
+  }, [qronId]);
 
   useEffect(() => {
     let isMounted = true;
     const loadRules = async () => {
+      const supabase = createClient();
+      if (!supabase) { setLoading(false); return; }
       const { data, error } = await supabase
         .from('redirect_rules')
         .select('*')
@@ -110,7 +112,7 @@ export function RedirectRulesManager({
 
     loadRules();
     return () => { isMounted = false; };
-  }, [qronId, supabase]);
+  }, [qronId]);
 
   const handleAddRule = async () => {
     if (!newRule.name) {
@@ -140,6 +142,8 @@ export function RedirectRulesManager({
           ? newRule.a_b_weight
           : 1, // Default to 1 for A/B if not set
     };
+    const supabase = createClient();
+    if (!supabase) return;
     const { error } = await supabase.from('redirect_rules').insert(ruleToInsert);
     if (error) {
       toast.error('Failed to add rule: ' + error.message);
